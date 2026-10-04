@@ -12,6 +12,84 @@ import pytest
 from modules import jobcard, selectors
 
 
+# ---------------------------------------------------------------- componentkeys
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        # Exactly what the capture found on real cards.
+        ("job-card-component-ref-4473342199", "4473342199"),
+        # The same trick on the details pane.
+        ("JobDetails_AboutTheJob_4473342199", "4473342199"),
+        ("JobDetails_AboutTheCompany_4473342199", "4473342199"),
+        ("JobDetailsPeopleWhoCanHelpSlot_4473342199", "4473342199"),
+        ("JobMatchRef_4473342199", "4473342199"),
+    ],
+)
+def test_job_ids_are_read_out_of_componentkeys(value, expected):
+    assert jobcard.id_from_componentkey(value) == expected
+    assert jobcard.id_from_text(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Real componentkeys from the capture that carry no job id.
+        "SearchResults_AllFiltersButton",
+        "SearchResultsMainContent",
+        "semanticSearchBox",
+        "JobsSearchFilters",
+        "searchResultsHeaderComponent",
+        # A uuid componentkey: short hex runs that must not be mistaken for an id.
+        "87799865-a64e-4c8c-9d87-a4dda5c5cf0a",
+        "auto-component-00352c33-1014-4ba7-b0ff-da7d202c8de1",
+    ],
+)
+def test_componentkeys_without_a_job_id_yield_nothing(value):
+    assert jobcard.id_from_componentkey(value) is None
+
+
+def test_a_componentkey_prefix_without_a_trailing_id_is_rejected():
+    assert jobcard.id_from_componentkey("job-card-component-ref-") is None
+
+
+class ComponentKeyCard:
+    '''A new-UI card: a role="button" div whose componentkey carries the job id.'''
+
+    def __init__(self, job_id, clickable=True):
+        self.job_id = job_id
+        self.clickable = clickable
+
+    def get_dom_attribute(self, name):
+        return None
+
+    def find_elements(self, by, selector):
+        if not self.clickable or not self.job_id:
+            return []
+        prefix = selector.split("^='")[-1].rstrip("']") if "^='" in selector else ""
+        if prefix == "job-card-component-ref-":
+            return [FakeKey("job-card-component-ref-" + self.job_id)]
+        return []
+
+
+class FakeKey:
+    def __init__(self, componentkey):
+        self.componentkey = componentkey
+
+    def get_dom_attribute(self, name):
+        return self.componentkey if name == "componentkey" else None
+
+
+def test_a_new_style_card_resolves_its_id_from_the_componentkey():
+    '''The captured markup has no data-job-id and no data-entity-urn at all.'''
+    card = ComponentKeyCard("4473342199")
+    assert jobcard.extract_job_id(None, card) == "4473342199"
+
+
+def test_a_new_style_card_without_an_id_reports_none_rather_than_guessing():
+    assert jobcard.extract_job_id(None, ComponentKeyCard(None)) is None
+
+
 # ---------------------------------------------------------------- id extraction
 
 
@@ -80,7 +158,7 @@ class FakeLink:
 def test_an_attribute_id_is_preferred_over_parsing_the_link():
     card = FakeCard(
         attributes={"data-job-id": "4123456789"},
-        links={selectors.JOB_CARD_LINK[0]: "/jobs/view/999"},
+        links={selectors.JOB_CARD_CLICKABLE[0]: "/jobs/view/999"},
     )
     assert jobcard.extract_job_id(None, card) == "4123456789"
 
@@ -95,7 +173,7 @@ def test_the_most_trustworthy_attribute_wins():
 
 
 def test_the_link_is_used_when_no_attribute_carries_an_id():
-    card = FakeCard(links={selectors.JOB_CARD_LINK[0]: "/jobs/view/analyst-4123456789"})
+    card = FakeCard(links={selectors.JOB_CARD_CLICKABLE[0]: "/jobs/view/analyst-4123456789"})
     assert jobcard.extract_job_id(None, card) == "4123456789"
 
 
@@ -106,7 +184,7 @@ def test_a_card_with_no_id_anywhere_returns_none():
 def test_an_underspecified_attribute_does_not_stop_the_next_candidate():
     card = FakeCard(
         attributes={"data-id": "some-opaque-token"},
-        links={selectors.JOB_CARD_LINK[0]: "/jobs/view/analyst-4123456789"},
+        links={selectors.JOB_CARD_CLICKABLE[0]: "/jobs/view/analyst-4123456789"},
     )
     assert jobcard.extract_job_id(None, card) == "4123456789"
 
@@ -118,7 +196,7 @@ def test_an_attribute_that_raises_does_not_stop_the_search():
                 raise RuntimeError("stale element reference")
             return None
 
-    card = Hostile(links={selectors.JOB_CARD_LINK[0]: "/jobs/view/analyst-4123456789"})
+    card = Hostile(links={selectors.JOB_CARD_CLICKABLE[0]: "/jobs/view/analyst-4123456789"})
     assert jobcard.extract_job_id(None, card) == "4123456789"
 
 
@@ -126,7 +204,7 @@ def test_relative_card_links_are_made_absolute():
     class Driver:
         current_url = "https://www.linkedin.com/jobs/search-results/?keywords=python"
 
-    card = FakeCard(links={selectors.JOB_CARD_LINK[0]: "/jobs/view/analyst-4123456789"})
+    card = FakeCard(links={selectors.JOB_CARD_CLICKABLE[0]: "/jobs/view/analyst-4123456789"})
     assert jobcard.card_link(Driver(), card) == "https://www.linkedin.com/jobs/view/analyst-4123456789"
 
 
@@ -135,7 +213,7 @@ def test_absolute_card_links_are_left_alone():
         current_url = "https://www.linkedin.com/jobs/search-results/"
 
     url = "https://www.linkedin.com/jobs/view/analyst-4123456789?x=1"
-    card = FakeCard(links={selectors.JOB_CARD_LINK[0]: url})
+    card = FakeCard(links={selectors.JOB_CARD_CLICKABLE[0]: url})
     assert jobcard.card_link(Driver(), card) == url
 
 

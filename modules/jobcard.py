@@ -3,13 +3,26 @@ Reading job cards off the results list.
 
 Kept separate from `runAiBot.py` because it is the part with the most moving pieces:
 the results list re-renders as you scroll, the same job can appear twice, and the
-card has to yield an id whether it carries one in an attribute or only in its link.
+card has to yield an id whichever way that page happens to carry one.
 
-Job ids are the stable part. LinkedIn identifies a posting as
-`urn:li:jobPosting:4123456789`, and every view URL ends in the same digits
-(`/jobs/view/senior-data-engineer-at-acme-4123456789`). Both of those formats have
-been stable for years, unlike the class names around them, so an id is extracted
-from them rather than from whatever the current markup happens to call itself.
+Where the job id actually is
+----------------------------
+On the new search a card carries **no id attribute at all**. It carries:
+
+    <div data-view-name="job-search-job-card">
+      <div componentkey="job-card-component-ref-4473342199" role="button" tabindex="0">
+
+so the id is the tail of a `componentkey`. The same trick works for the details pane
+(`JobDetails_AboutTheJob_4473342199`, `JobMatchRef_4473342199`), which is why
+`id_from_componentkey()` is the first thing tried. The classic attributes and the
+`/jobs/view/` URL are still handled afterwards, for the classic UI.
+
+Note the capture found **25 cards but no apply button on any of them** - the apply
+control lives only on the focused job's details pane. So a card has to be selected
+before it can be applied to.
+
+Because the list is virtualised (`data-testid="lazy-column"`), the elements returned
+here are only valid until the next scroll. Never hold on to them across one.
 '''
 
 import re
@@ -31,19 +44,46 @@ _JOB_URN = re.compile(r"urn:li:jobPosting:(\d+)")
 # would pull "2" out of "/jobs/view/software-engineer-2-4123456789".
 _JOB_VIEW_URL = re.compile(r"/jobs/view/[^/?#]*?-?(\d{6,})(?:[/?#]|$)")
 
+# A componentkey's job id is always the trailing digit run, e.g.
+# `job-card-component-ref-4473342199` or `JobDetails_AboutTheJob_4473342199`.
+# Anchoring to the end matters: the other parts are hex-ish and can contain short
+# digit runs, and only the id is at the end.
+_COMPONENTKEY_TRAILING_ID = re.compile(r"(\d{6,})$")
+
 # Six digits is a floor, not a guess at the real length: it is there to avoid
 # latching onto a stray number in a slug ("remote-2", "level-3") if the optional
 # slug part is ever missing.
 _JOB_ID = re.compile(r"(\d{6,})")
 
 
+def id_from_componentkey(value: str | None) -> str | None:
+    '''
+    The job id embedded in a `componentkey`, or None.
+
+    Only a componentkey whose prefix is a known id-bearing one counts, so an
+    unrelated key such as `SearchResults_AllFiltersButton` cannot produce a bogus id
+    from whatever digits happen to end it.
+    '''
+    if not value:
+        return None
+    value = str(value).strip()
+    if not any(value.startswith(prefix) for prefix in selectors.JOB_ID_COMPONENTKEYS):
+        return None
+    match = _COMPONENTKEY_TRAILING_ID.search(value)
+    return match.group(1) if match else None
+
+
 def id_from_text(value: str | None) -> str | None:
     '''
-    Pulls a job id out of a URN or a view URL. Returns None if there isn't one.
+    Pulls a job id out of a componentkey, a URN or a view URL. Returns None if there
+    isn't one.
     '''
     if not value:
         return None
     value = str(value)
+    found = id_from_componentkey(value)
+    if found:
+        return found
     match = _JOB_URN.search(value) or _JOB_VIEW_URL.search(value)
     if match:
         return match.group(1)
@@ -55,11 +95,24 @@ def extract_job_id(driver: WebDriver, card: WebElement) -> str | None:
     '''
     The job id for a card, or None if the card yields nothing usable.
 
-    The card's own attributes are tried first, because an id attribute needs no
-    interpretation, then the card's link. `get_dom_attribute` is used rather than
-    `get_attribute` because it reports the literal DOM value instead of the
-    property, which is what these attributes actually are.
+    The order follows where the id actually lives: the card's `componentkey` first
+    (the only place the new UI puts it), then any id-bearing attribute, then the
+    link. `get_dom_attribute` is used rather than `get_attribute` because it reports
+    the literal DOM value instead of the property, which is what these are.
     '''
+    for selector in selectors.JOB_ID_COMPONENTKEYS:
+        try:
+            holders = card.find_elements(By.CSS_SELECTOR, f"[componentkey^='{selector}']")
+        except Exception:
+            continue
+        for holder in holders:
+            try:
+                found = id_from_componentkey(holder.get_dom_attribute("componentkey"))
+            except Exception:
+                continue
+            if found:
+                return found
+
     for attribute in selectors.JOB_ID_ATTRIBUTES:
         try:
             raw = card.get_dom_attribute(attribute)
@@ -69,7 +122,7 @@ def extract_job_id(driver: WebDriver, card: WebElement) -> str | None:
         if found:
             return found
 
-    for selector in selectors.JOB_CARD_LINK:
+    for selector in selectors.JOB_CARD_CLICKABLE:
         try:
             links = card.find_elements(By.CSS_SELECTOR, selector)
         except Exception:
@@ -86,9 +139,18 @@ def extract_job_id(driver: WebDriver, card: WebElement) -> str | None:
     return None
 
 
+JOB_VIEW_BASE = "https://www.linkedin.com/jobs/view/"
+
+
 def card_link(driver: WebDriver, card: WebElement) -> str | None:
-    '''The absolute view URL for a card, or None if it has no usable link.'''
-    for selector in selectors.JOB_CARD_LINK:
+    '''
+    A view URL for the card, or None if the card yields neither a link nor an id.
+
+    New-UI cards are `role="button"` divs with no `<a>` at all, so the URL is built
+    from the job id when there is no link to read. `/jobs/view/<id>/` is a
+    long-standing canonical form that redirects to the titled URL.
+    '''
+    for selector in selectors.JOB_CARD_CLICKABLE:
         try:
             links = card.find_elements(By.CSS_SELECTOR, selector)
         except Exception:
@@ -98,13 +160,14 @@ def card_link(driver: WebDriver, card: WebElement) -> str | None:
                 href = link.get_dom_attribute("href")
             except Exception:
                 continue
-            if not href:
+            if not href or "/jobs/view/" not in href:
                 continue
             if href.startswith("/"):
-                base = driver.current_url.split("/jobs/")[0]
-                return base + href
+                return driver.current_url.split("/jobs/")[0] + href
             return href
-    return None
+
+    job_id = extract_job_id(driver, card)
+    return f"{JOB_VIEW_BASE}{job_id}/" if job_id else None
 
 
 def _first_text(driver: WebDriver, card: WebElement, candidates: list[str]) -> str:
