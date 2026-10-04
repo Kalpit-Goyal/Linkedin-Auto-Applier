@@ -19,6 +19,11 @@ venv/
 # Agent/tool scratch space
 .kilo/
 
+# Raw markup captured from a logged-in LinkedIn session by tools/capture_dom.py.
+# It contains your search, job targets and profile details, and is only useful
+# locally as a reference while writing selectors.
+tools/_dom_dump/
+
 # Saved login state: the persistent Chrome profile (usually under
 # %USERPROFILE%\.auto-job-apply) and the exported cookie jar. Never commit
 # these, they contain live LinkedIn auth tokens.
