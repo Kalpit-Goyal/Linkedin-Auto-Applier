@@ -45,6 +45,7 @@ from modules.open_chrome import *
 from modules.helpers import *
 from modules.clickers_and_finders import *
 from modules.validator import validate_config
+from modules.session import load_linkedin_cookies, save_linkedin_cookies, has_saved_cookies
 
 from modules.question_store import find_answer as qa_find, save_question as qa_save
 
@@ -114,6 +115,35 @@ def is_logged_in_LN() -> bool:
     return True
 
 
+def enable_keep_signed_in() -> None:
+    '''
+    Ticks LinkedIn's "Keep me signed in" box before signing in.
+    Without it the auth cookie is a *session* cookie, which Chrome discards on
+    exit - the main reason a login wouldn't still be there next run.
+    Best effort: LinkedIn redesigns this form often, so any failure is logged
+    and ignored rather than being allowed to break the login.
+    '''
+    candidates = (
+        (By.ID, "rememberMe"),
+        (By.CSS_SELECTOR, "input[type='checkbox'][name='rememberMe']"),
+        (By.CSS_SELECTOR, "input[type='checkbox'][id*='remember']"),
+        (By.XPATH, "//label[contains(., 'Keep me signed in')]//input[@type='checkbox']"),
+        (By.XPATH, "//label[contains(., 'Keep me signed in')]"),
+    )
+    for by, selector in candidates:
+        try:
+            box = driver.find_element(by, selector)
+            if box.tag_name.lower() == "input" and box.is_selected():
+                print_lg("'Keep me signed in' was already ticked.")
+            else:
+                box.click()
+                print_lg("Ticked 'Keep me signed in' so this login lasts to the next run.")
+            return
+        except Exception:
+            continue
+    print_lg("Couldn't find the 'Keep me signed in' box, skipping it. The saved cookie jar will keep the login instead.")
+
+
 def login_LN() -> None:
     '''
     Function to login for LinkedIn
@@ -140,6 +170,9 @@ def login_LN() -> None:
         except Exception as e:
             print_lg("Couldn't find password field.")
             # print_lg(e)
+        # Ask LinkedIn for a long-lived auth cookie, so this login is still
+        # valid on the next run.
+        enable_keep_signed_in()
         # Find the login submit button and click it
         driver.find_element(By.XPATH, '//button[@type="submit" and contains(text(), "Sign in")]').click()
     except Exception as e1:
@@ -158,6 +191,32 @@ def login_LN() -> None:
         print_lg("Seems like login attempt failed! Possibly due to wrong credentials or already logged in! Try logging in manually!")
         # print_lg(e)
         manual_login_retry(is_logged_in_LN, 2)
+
+
+def restore_saved_login() -> bool:
+    '''
+    Try to reuse the login saved on a previous run by re-applying the exported
+    cookie jar. The browser profile is already loaded by this point, so this is
+    the second chance for a login that Chrome didn't keep.
+
+    Returns True if it worked.
+    '''
+    if not keep_login_session or not has_saved_cookies(): return False
+    print_lg("Trying the LinkedIn login saved on your last run...")
+    if not load_linkedin_cookies(driver): return False
+    # Cookies can only be re-applied from a page on the matching domain, and the
+    # feed is the cheapest place to find out whether LinkedIn accepted them.
+    driver.get("https://www.linkedin.com/feed/")
+    if is_logged_in_LN():
+        print_lg("Logged in using your saved session. No need to sign in again!")
+        return True
+    print_lg("The saved session was rejected by LinkedIn, so you'll need to log in again.")
+    return False
+
+
+def save_login_session() -> None:
+    '''Remember this login for the next run. Best effort, never raises.'''
+    save_linkedin_cookies(driver)
 #>
 
 
@@ -1172,10 +1231,14 @@ def main() -> None:
             pyautogui.alert(text='Your default resume "{}" is missing! Please update it\'s folder path "default_resume_path" in config.py\n\nOR\n\nAdd a resume with exact name and path (check for spelling mistakes including cases).\n\n\nFor now the bot will continue using your previous upload from LinkedIn!'.format(default_resume_path), title="Missing Resume", button="OK")
             useNewResume = False
         
-        # Login to LinkedIn
+        # Login to LinkedIn. The browser profile and the saved cookie jar mean
+        # this normally costs nothing - login_LN() is only reached on a genuine
+        # first run, or once LinkedIn itself has expired the session.
         tabs_count = len(driver.window_handles)
         driver.get("https://www.linkedin.com/login")
+        if not is_logged_in_LN(): restore_saved_login()
         if not is_logged_in_LN(): login_LN()
+        save_login_session()
         
         linkedIn_tab = driver.current_window_handle
 
@@ -1262,6 +1325,9 @@ def main() -> None:
                 print_lg("Failed to close AI client:", e)
         try:
             if driver:
+                # Grab the login before closing, so it's still there even if this
+                # run ended in an error. Never raises.
+                save_login_session()
                 driver.quit()
         except WebDriverException as e:
             print_lg("Browser already closed.", e)

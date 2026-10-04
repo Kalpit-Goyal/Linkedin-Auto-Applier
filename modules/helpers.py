@@ -52,12 +52,11 @@ def make_directories(paths: list[str]) -> None:
 
 def get_default_temp_profile() -> str:
     # Thanks to https://github.com/vinodbavage31 for suggestion!
-    home = pathlib.Path.home()
-    if sys.platform.startswith('win'):
-        return "--user-data-dir=C:\\temp\\auto-job-apply-profile"
-    elif sys.platform.startswith('linux'):
-        return str(home / ".auto-job-apply-profile")
-    return str(home / "Library" / "Application Support" / "Google" / "Chrome" / "auto-job-apply-profile")
+    # NOTE: this must return a bare directory path. It used to return a string
+    # that already contained the "--user-data-dir=" flag, which the caller
+    # wrapped a second time, producing the nonsense argument
+    # "--user-data-dir=--user-data-dir=C:\temp\..." that Chrome ignored.
+    return str(pathlib.Path.home() / ".auto-job-apply" / "browser-profile")
 
 
 def find_default_profile_directory() -> str | None:
@@ -66,6 +65,12 @@ def find_default_profile_directory() -> str | None:
     across Windows, macOS, and Linux, regardless of OS version.
 
     Returns the absolute path as a string, or None if the path is not found.
+
+    WARNING: do NOT feed this to a running browser unless Chrome is closed.
+    Chrome locks its 'User Data' folder while it is open, so launching a second
+    Chrome against it fails with "session not created: DevToolsActivePort file
+    doesn't exist". Session persistence is handled by the tool's own profile
+    folder instead - see `modules.session.get_session_profile_dir()`.
     '''
     
     home = pathlib.Path.home()

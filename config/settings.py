@@ -76,6 +76,17 @@ disable_extensions = False          # True or False, Note: True or False are cas
 # Run in safe mode. Set this true if chrome is taking too long to open or if you have multiple profiles in browser. This will open chrome in guest profile!
 safe_mode = False                   # True or False, Note: True or False are case-sensitive
 
+# Stay logged in to LinkedIn between runs. When on, the tool keeps its own Chrome
+# profile and also saves the LinkedIn cookies to disk, so you log in once instead
+# of being asked on every run. Turn it off if you want a clean session each time.
+keep_login_session = True           # True or False, Note: True or False are case-sensitive
+
+# Folder used as the tool's Chrome profile, which is what keeps the LinkedIn login
+# alive. Leave blank for the default (~/.auto-job-apply/browser-profile). Don't
+# point this at your normal Chrome "User Data" folder: Chrome locks that folder
+# while it's running and the bot would fail to start every time.
+session_profile_dir = ""
+
 # Do you want scrolling to be smooth or instantaneous? (Can reduce performance if True)
 smooth_scroll = False               # True or False, Note: True or False are case-sensitive
 
