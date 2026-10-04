@@ -141,8 +141,19 @@ PAGINATION_PAGE = [
     "button[aria-label^='Page ']",   # verified, e.g. aria-label="Page 2"
     "button[data-testid^='pagination-indicator']",
 ]
+# Verified: the page you are on is the one button whose aria-current is "true"; every
+# other page button reads "false". Reading the active page off this is more reliable
+# than counting clicks, which drift if a page turn is ever slow.
+PAGINATION_CURRENT = [
+    "button[aria-label^='Page '][aria-current='true']",
+]
+# Verified: the arrow after the list, which only exists while another page does.
 PAGINATION_PREVIOUS = ["button[aria-label='Previous page']", "button[aria-label='Previous']"]
-PAGINATION_NEXT = ["button[aria-label='Next page']", "button[aria-label='Next']"]
+PAGINATION_NEXT = [
+    "[data-testid='pagination-controls-next-button-visible']",   # verified
+    "button[aria-label='Next page']",
+    "button[aria-label='Next']",
+]
 
 # The new list also grows on scroll; this is for when it has not been scrolled yet.
 LOAD_MORE = [

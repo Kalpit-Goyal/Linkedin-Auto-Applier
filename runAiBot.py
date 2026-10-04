@@ -46,6 +46,7 @@ from modules.helpers import *
 from modules.clickers_and_finders import *
 from modules.validator import validate_config
 from modules.session import load_linkedin_cookies, save_linkedin_cookies, has_saved_cookies
+from modules import newui, jobcard
 
 from modules.question_store import find_answer as qa_find, save_question as qa_save
 
@@ -1197,14 +1198,263 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                 print_lg(f"Could not capture the page source; the browser may have crashed. {dump_error}")
 
         
+# Function to blacklist a job using the new UI's own "About the company" block
+def check_blacklist_on_details(rejected_jobs: set, job_id: str, company: str, blacklisted_companies: set, about_company: str) -> tuple[set, set]:
+    '''
+    Blacklists a job from the description pane's company blurb.
+
+    Same rules and the same ValueError as check_blacklist(), but the blurb comes from a
+    verified componentkey instead of the classic "jobs-company__box", so the caller's
+    error handling does not need to know which UI produced it.
+    '''
+    text = (about_company or "").lower()
+    if not text: return rejected_jobs, blacklisted_companies
+    skip_checking = False
+    for word in about_company_good_words:
+        if word.lower() in text:
+            print_lg(f'Found the word "{word}". So, skipped checking for blacklist words.')
+            skip_checking = True
+            break
+    if not skip_checking:
+        for word in about_company_bad_words:
+            if word.lower() in text:
+                rejected_jobs.add(job_id)
+                blacklisted_companies.add(company)
+                raise ValueError(f'"{about_company}"\n\nContains "{word}".')
+    return rejected_jobs, blacklisted_companies
+
+
+
+# Function to apply to the jobs in a search the user has already set up
+def apply_to_current_results() -> None:
+    '''
+    Applies to the jobs in the search that is already on screen.
+
+    The search itself, its filters and the Easy Apply filter are the user's to set: this
+    walks the cards that are rendered and submits, and builds no search of its own.
+    Two properties of the new UI shape the loop:
+
+    - Cards are re-read from scratch on every pass. The list is virtualised, so card
+      elements are recycled on scroll and a list held across a scroll would point at
+      different jobs by the time it was used.
+    - Every card's job id is checked against the details pane after the click. A click
+      can land late or on a neighbouring row, and without that check the bot would
+      submit to whichever job happened to be on screen.
+
+    Only Easy Apply is driven here. Off-site jobs are reported and skipped rather than
+    sent down external_apply(), whose tab handling was written for the classic UI.
+    '''
+    applied_jobs = get_applied_job_ids()
+    rejected_jobs = set()
+    blacklisted_companies = set()
+    global current_city, failed_count, skip_count, easy_applied_count, external_jobs_count, tabs_count, pause_before_submit, useNewResume
+    current_city = current_city.strip()
+
+    if not newui.results_ready(driver, time=20):
+        print_lg("Nothing to apply to. Set up your search first, then run the applier.")
+        return
+
+    uploaded = False
+    current_count = 0
+    try:
+        while current_count < switch_number:
+            buffer(3)
+            # Re-read every pass on purpose: the list recycles its rows.
+            cards = newui.list_cards(driver)
+            print_lg(f"{len(cards)} job cards currently rendered.")
+            if not cards:
+                print_lg("No cards rendered; the list may have run out.")
+                break
+
+            for card in cards:
+                if keep_screen_awake: pyautogui.press('shiftright')
+                if current_count >= switch_number: break
+                print_lg("\n-@-\n")
+
+                card_data = jobcard.read_card(driver, card)
+                job_id = card_data["job_id"]
+                title = card_data["title"] or "Unknown"
+                company = card_data["company"] or "Unknown"
+                work_location = card_data["location"] or "Unknown"
+                # The classic UI read the work style off the card's metadata row; the new
+                # card does not expose one, so this stays Unknown rather than guessed.
+                work_style = "Unknown"
+
+                if not job_id:
+                    skip_count += 1
+                    print_lg('Skipping a card with no readable job id.')
+                    continue
+                job_link = f"https://www.linkedin.com/jobs/view/{job_id}"
+
+                if job_id in rejected_jobs:
+                    skip_count += 1
+                    print_lg(f'Skipping previously rejected "{title} | {company}" job. Job ID: {job_id}!')
+                    continue
+                if company in blacklisted_companies:
+                    skip_count += 1
+                    print_lg(f'Skipping "{title} | {company}" job (Blacklisted Company). Job ID: {job_id}!')
+                    continue
+                if job_id in applied_jobs:
+                    skip_count += 1
+                    print_lg(f'Already applied to "{title} | {company}" job. Job ID: {job_id}!')
+                    continue
+
+                # Opens the job and confirms the pane belongs to it.
+                if not newui.select_card(driver, card):
+                    skip_count += 1
+                    print_lg(f'Could not open "{title} | {company}". Job ID: {job_id}!')
+                    continue
+
+                details = newui.read_details(driver)
+                description = details["description"] or "Unknown"
+                date_listed = newui.read_posted_date(driver)
+                experience_required = extract_years_of_experience(description) if description != "Unknown" else 0
+
+                try:
+                    check_blacklist_on_details(rejected_jobs, job_id, company, blacklisted_companies, details["about_company"])
+                except ValueError as e:
+                    print_lg(e, 'Skipping this job!\n')
+                    failed_job(job_id, job_link, "Pending", date_listed, "Found Blacklisted words in About Company", e, "Skipped", "Not Available")
+                    skip_count += 1
+                    continue
+
+                hr_link = "Unknown"
+                hr_name = "Unknown"
+                connect_request = "In Development"
+                skills = "Needs an AI"
+                reposted = False
+                resume = "Pending"
+                questions_list = None
+                screenshot_name = "Not Available"
+                application_link = "Easy Applied"
+                date_applied = "Pending"
+
+                mode = newui.apply_mode(driver)
+                if mode == newui.APPLY_NONE:
+                    skip_count += 1
+                    print_lg(f'No way to apply to "{title} | {company}" (it may be closed). Job ID: {job_id}!')
+                    continue
+                if mode == newui.APPLY_ALREADY:
+                    applied_jobs.add(job_id)
+                    skip_count += 1
+                    print_lg(f'Already applied to "{title} | {company}". Job ID: {job_id}!')
+                    continue
+                if mode == newui.APPLY_EXTERNAL:
+                    # Not driven here: external_apply() opens tabs and was written for
+                    # the classic UI. Easy Apply should have been filtered out anyway.
+                    skip_count += 1
+                    print_lg(f'"{title} | {company}" is off-site only, skipping. Job ID: {job_id}!')
+                    continue
+
+                print_lg(f'Trying to Easy Apply to "{title} | {company}" job. Job ID: {job_id}')
+                modal = None
+                try:
+                    errored = ""
+                    modal = newui.open_easy_apply(driver)
+                    if not modal:
+                        raise Exception("The Easy Apply modal never opened.")
+                    resume = "Previous resume"
+                    questions_list = set()
+                    next_counter = 0
+                    next_button = True
+                    while next_button:
+                        next_counter += 1
+                        if next_counter >= 15:
+                            if pause_at_failed_question:
+                                screenshot_name = screenshot(driver, job_id, "Needed manual intervention for failed question")
+                                pyautogui.alert("Couldn't answer one or more questions.\nPlease click \"Continue\" once done.\nDO NOT CLICK Back, Next or Review button in LinkedIn.\n\n\n\n\nYou can turn off \"Pause at failed question\" setting in config.py", "Help Needed", "Continue")
+                                next_counter = 1
+                                continue
+                            if questions_list: print_lg("Stuck for one or some of the following questions...", questions_list)
+                            screenshot_name = screenshot(driver, job_id, "Failed at questions")
+                            errored = "stuck"
+                            raise Exception("Seems like stuck in a continuous loop of next, probably because of new questions.")
+                        questions_list = answer_questions(modal, questions_list, work_location, job_description=description)
+                        if useNewResume and not uploaded: uploaded, resume = upload_resume(modal, default_resume_path)
+                        # The flow replaces the dialog between steps, so the handle taken
+                        # at open time can be stale by now.
+                        modal = newui.refind_modal(driver) or modal
+                        try:
+                            next_button = newui.advance(driver, modal, "Next")
+                        except ElementClickInterceptedException:
+                            # A click meant for Next can land on the company photos strip.
+                            break
+                        if not next_button: break
+                        buffer(click_gap)
+
+                    if questions_list and errored != "stuck":
+                        print_lg("Answered the following questions...", questions_list)
+                        print("\n\n" + "\n".join(str(question) for question in questions_list) + "\n\n")
+
+                    cur_pause_before_submit = pause_before_submit
+                    if cur_pause_before_submit:
+                        decision = pyautogui.confirm('1. Please verify your information.\n2. If you edited something, please return to this final screen.\n3. DO NOT CLICK "Submit Application".\n\n\n\n\nYou can turn off "Pause before submit" setting in config.py\nTo TEMPORARILY disable pausing, click "Disable Pause"', "Confirm your information",["Disable Pause", "Discard Application", "Submit Application"])
+                        if decision == "Discard Application": raise Exception("Job application discarded by user!")
+                        pause_before_submit = False if "Disable Pause" == decision else True
+                    follow_company(modal)
+
+                    if newui.advance(driver, modal, "Submit application"):
+                        date_applied = datetime.now()
+                        if not newui.advance(driver, modal, "Done"):
+                            try: actions.send_keys(Keys.ESCAPE).perform()
+                            except: pass
+                    else:
+                        print_lg("Submit Application was not found, so the application is discarded rather than left open.")
+                        raise Exception("Failed to click Submit application")
+
+                except Exception as e:
+                    print_lg("Failed to Easy Apply!")
+                    # print_lg(e)
+                    critical_error_log("Somewhere in Easy Apply process", e)
+                    failed_job(job_id, job_link, resume, date_listed, "Problem in Easy Applying", e, application_link, screenshot_name)
+                    failed_count += 1
+                    newui.discard_application(driver, root=modal, actions=actions)
+                    continue
+
+                submitted_jobs(job_id, title, company, work_location, work_style, description, experience_required, skills, hr_name, hr_link, resume, reposted, date_listed, date_applied, job_link, application_link, questions_list, connect_request)
+                if uploaded:   useNewResume = False
+
+                print_lg(f'Successfully saved "{title} | {company}" job. Job ID: {job_id} info')
+                current_count += 1
+                easy_applied_count += 1
+                applied_jobs.add(job_id)
+                cooldown = randint(15, 30)
+                print_lg(f"Waiting {cooldown} seconds before the next application...")
+                sleep(cooldown)
+
+            if current_count >= switch_number: break
+
+            # Work through the pages the user prepared, then stop.
+            newui.close_details(driver)
+            page = newui.current_page(driver)
+            if page is None or not newui.go_to_next_page(driver, page):
+                print_lg("\n>-> Reached the end of the results.\n")
+                break
+
+    except (NoSuchWindowException, WebDriverException) as e:
+        print_lg("The browser window was closed or the session became invalid. Stopping.", e)
+        raise e  # let the outer handler deal with it
+    except Exception as e:
+        print_lg("Could not read the job listings.")
+        critical_error_log("In Applier", e)
+        try:
+            print_lg(driver.page_source, pretty=True)
+        except Exception as dump_error:
+            print_lg(f"Could not capture the page source; the browser may have crashed. {dump_error}")
+
+
+
 def run(total_runs: int) -> int:
     if dailyEasyApplyLimitReached:
         return total_runs
     print_lg("\n########################################################################################################################\n")
     print_lg(f"Date and Time: {datetime.now()}")
     print_lg(f"Cycle number: {total_runs}")
-    print_lg(f"Currently looking for jobs posted within '{date_posted}' and sorting them by '{sort_by}'")
-    apply_to_jobs(search_terms)
+    print_lg("Using the search already set up in the browser. Set the keywords, the filters and the Easy Apply filter there before running.")
+    # The new UI builds its search through filter pills and URL parameters, and the
+    # Easy Apply filter is the user's to set. The applier therefore starts from
+    # whatever is on screen; apply_to_jobs() is kept for the classic search.
+    apply_to_current_results()
     print_lg("########################################################################################################################\n")
     if not dailyEasyApplyLimitReached:
         print_lg("Sleeping for 10 min...")

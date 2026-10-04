@@ -166,6 +166,68 @@ def close_details(driver: WebDriver) -> None:
         deep_click(driver, button)
 
 
+# ---------------------------------------------------------------- pagination
+
+
+def current_page(driver: WebDriver) -> int | None:
+    '''
+    Which page the results are on, read off the pagination control.
+
+    Verified: the page you are on is the one button with `aria-current="true"`, and
+    every other page button reads `"false"`. Reading the control beats counting clicks,
+    which drift the moment a page turn is slow and the next click lands on the same page.
+    '''
+    buttons = deep_find(driver, selectors.PAGINATION_CURRENT, time=1, all_elements=True)
+    for button in buttons or []:
+        number = _page_number(button)
+        if number:
+            return number
+
+    # Same rule, without leaning on the dedicated selector: whichever page button is
+    # flagged as the current one.
+    for button in deep_find(driver, selectors.PAGINATION_PAGE, time=0, all_elements=True) or []:
+        try:
+            if (button.get_dom_attribute("aria-current") or "").strip().lower() == "true":
+                return _page_number(button)
+        except Exception:
+            continue
+    return None
+
+
+def go_to_next_page(driver: WebDriver, page: int, time: float = 6.0) -> bool:
+    '''
+    Turns to page + 1, and confirms the turn happened.
+
+    Returns False at the end of the results, which is a normal stop rather than a
+    failure - the caller should finish, not retry.
+    '''
+    button = deep_find(
+        driver,
+        [f"button[aria-label='Page {page + 1}']"] + selectors.PAGINATION_NEXT,
+        time=2,
+    )
+    if not button:
+        return False
+    if not deep_click(driver, button):
+        return False
+
+    sleep(2)
+    landed = current_page(driver)
+    if landed is not None and landed != page + 1:
+        print_lg(f"Asked for page {page + 1} but the control still reads {landed}.")
+        return False
+    return True
+
+
+def _page_number(button) -> int | None:
+    try:
+        label = button.get_dom_attribute("aria-label") or ""
+    except Exception:
+        return None
+    digits = re.search(r"\d+", label)
+    return int(digits.group()) if digits else None
+
+
 # ---------------------------------------------------------------- reading a job
 
 
@@ -265,6 +327,18 @@ def open_easy_apply(driver: WebDriver, time: float = 10.0):
 
     print_lg("Easy Apply modal opened.")
     return modal
+
+
+def refind_modal(driver: WebDriver, time: float = 4.0):
+    '''
+    Re-acquires the modal, which the flow replaces as it moves between steps.
+
+    Between the resume step, the questions and the review screen LinkedIn swaps the
+    dialog's contents, and the element handle captured at the start can go stale. The
+    previous handle is kept as a fallback so a failed re-find does not throw away a
+    modal that is still on screen.
+    '''
+    return deep_find(driver, MODAL_CANDIDATES, time=time)
 
 
 def advance(driver: WebDriver, root, label: str, time: float = 4.0) -> bool:

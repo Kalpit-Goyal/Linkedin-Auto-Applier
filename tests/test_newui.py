@@ -23,14 +23,19 @@ from modules import newui, selectors
 class FakeNode:
     '''An element with just enough surface for the lookups under test.'''
 
-    def __init__(self, componentkey=None, text="", children=None):
+    def __init__(self, componentkey=None, text="", children=None, aria=None):
         self.componentkey = componentkey
         self.text = text
         self.children = children or []
+        self.aria = aria or {}
         self.clicks = 0
 
     def get_dom_attribute(self, name):
-        return self.componentkey if name == "componentkey" else None
+        if name == "componentkey":
+            return self.componentkey
+        if name.startswith("aria-"):
+            return self.aria.get(name)
+        return None
 
     def find_elements(self, by, selector):
         return self.children if selector == "span" else []
@@ -279,3 +284,69 @@ def test_details_omit_the_title_and_company_rather_than_guessing(monkeypatch):
     assert "title" not in details
     assert "company" not in details
     assert details["description"] == ""
+
+
+# ---------------------------------------------------------------- pagination
+
+
+def page_button(number, current=False):
+    return FakeNode(aria={"aria-label": f"Page {number}", "aria-current": "true" if current else "false"})
+
+
+def test_the_current_page_is_read_from_the_flagged_button(monkeypatch):
+    install(monkeypatch, {selectors.PAGINATION_CURRENT[0]: [page_button(2, current=True)]})
+    assert newui.current_page(None) == 2
+
+
+def test_the_page_is_still_found_when_the_dedicated_selector_does_not_match(monkeypatch):
+    install(monkeypatch, {selectors.PAGINATION_PAGE[0]: [page_button(3, current=True), page_button(1)]})
+    assert newui.current_page(None) == 3
+
+
+def test_a_control_with_no_current_page_reads_as_none(monkeypatch):
+    '''Nothing flagged as current means no page is guessed, so the caller stops.'''
+    install(
+        monkeypatch,
+        {
+            selectors.PAGINATION_CURRENT[0]: [],
+            selectors.PAGINATION_PAGE[0]: [page_button(1), page_button(2)],
+        },
+    )
+    assert newui.current_page(None) is None
+
+
+def test_no_pagination_at_all_reads_as_none(monkeypatch):
+    install(monkeypatch)
+    assert newui.current_page(None) is None
+
+
+def test_the_end_of_the_results_is_a_normal_stop_not_a_failure(monkeypatch):
+    '''One page of results is the common case, so this must return False quietly.'''
+    install(monkeypatch, {selectors.PAGINATION_CURRENT[0]: [page_button(1, current=True)]})
+    assert newui.go_to_next_page(None, page=1) is False
+
+
+def test_a_page_turn_is_confirmed_rather_than_assumed(monkeypatch):
+    install(
+        monkeypatch,
+        {
+            "button[aria-label='Page 2']": [page_button(2)],
+            selectors.PAGINATION_CURRENT[0]: [page_button(2, current=True)],
+        },
+    )
+    assert newui.go_to_next_page(None, page=1) is True
+
+
+def test_a_page_turn_that_does_not_happen_is_reported(monkeypatch):
+    '''
+    The control still reads page 1 after clicking, so the turn did not take. Returning
+    True here would make the caller apply to the same jobs a second time.
+    '''
+    install(
+        monkeypatch,
+        {
+            "button[aria-label='Page 2']": [page_button(2)],
+            selectors.PAGINATION_CURRENT[0]: [page_button(1, current=True)],
+        },
+    )
+    assert newui.go_to_next_page(None, page=1) is False
