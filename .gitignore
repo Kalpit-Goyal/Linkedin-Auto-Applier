@@ -1,0 +1,42 @@
+__pycache__
+.pytest_cache
+.vscode
+.idea
+
+all excels
+all resumes
+logs
+
+old
+
+apikeys.py
+
+# Virtual environments. Both spellings exist in the wild (start.bat creates
+# `.venv`, but this checkout also has a plain `venv/`).
+.venv
+venv/
+
+# Agent/tool scratch space
+.kilo/
+
+# Saved login state: the persistent Chrome profile (usually under
+# %USERPROFILE%\.auto-job-apply) and the exported cookie jar. Never commit
+# these, they contain live LinkedIn auth tokens.
+session/
+.auto-job-apply/
+
+# Personal documents dropped in the project root (e.g. resume PDFs). The tool
+# reads resumes from `all resumes/`, which is already ignored above.
+/*.pdf
+/*.docx
+
+# Local control-panel runtime files — contain your credentials/answers, never commit
+user_config.json
+.bot_run.log
+.bot_run.pid
+questions_db/
+
+# `secrets.py` and `config/personals.py` used to be listed here, which broke
+# every fresh clone (both modules are imported at startup). They only ever hold
+# upstream placeholder values — real credentials live in user_config.json, which
+# is still ignored above. Keep them tracked.
