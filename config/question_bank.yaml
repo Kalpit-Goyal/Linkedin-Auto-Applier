@@ -1,0 +1,150 @@
+# Question Bank - Explicit answers checked FIRST (before profile rules)
+# Each entry: pattern (regex), question_type, options (optional), answer
+# Patterns are matched case-insensitive against the question label.
+# Order matters: first match wins.
+# If options are provided, they must match the current question's options exactly.
+
+# --- Citizenship / Authorization ---
+- pattern: "citizen|citizenship|employment eligibility"
+  question_type: "select"
+  options: ["U.S. Citizen/Permanent Resident", "Non-citizen allowed to work for any employer", "Non-citizen allowed to work for current employer", "Non-citizen seeking work authorization", "Canadian Citizen/Permanent Resident", "Other"]
+  answer: "U.S. Citizen/Permanent Resident"
+
+- pattern: "visa|sponsorship"
+  question_type: "select"
+  options: ["Yes", "No"]
+  answer: "No"
+
+# --- Veteran / Disability / Gender ---
+- pattern: "veteran|protected veteran"
+  question_type: "select"
+  options: ["Yes", "No", "Decline"]
+  answer: "Decline"
+
+- pattern: "disability|handicapped"
+  question_type: "select"
+  options: ["Yes", "No", "Decline"]
+  answer: "Decline"
+
+- pattern: "^gender$|^sex$"
+  question_type: "select"
+  options: ["Male", "Female", "Other", "Decline"]
+  answer: "Decline"
+
+- pattern: "ethnicity|race"
+  question_type: "select"
+  options: ["Hispanic/Latino", "American Indian or Alaska Native", "Asian", "Black or African American", "Native Hawaiian or Other Pacific Islander", "White", "Other", "Decline"]
+  answer: "Decline"
+
+# --- Contact ---
+- pattern: "phone|mobile"
+  question_type: "text"
+  answer: ""  # Uses profile phone_number
+
+- pattern: "email"
+  question_type: "text"
+  answer: ""  # Uses profile email_address
+
+- pattern: "linkedin"
+  question_type: "text"
+  answer: ""  # Uses profile linkedIn
+
+- pattern: "website|blog|portfolio"
+  question_type: "text"
+  answer: ""  # Uses profile website
+
+# --- Address ---
+- pattern: "street"
+  question_type: "text"
+  answer: ""  # Uses profile street
+
+- pattern: "city"
+  question_type: "text"
+  answer: ""  # Uses profile current_city
+
+- pattern: "state|province"
+  question_type: "text"
+  answer: ""  # Uses profile state
+
+- pattern: "zip|postal"
+  question_type: "text"
+  answer: ""  # Uses profile zipcode
+
+- pattern: "country"
+  question_type: "text"
+  answer: ""  # Uses profile country
+
+# --- Name ---
+- pattern: "full name|legal name|signature"
+  question_type: "text"
+  answer: ""  # Uses profile full_name
+
+- pattern: "first name"
+  question_type: "text"
+  answer: ""  # Uses profile first_name
+
+- pattern: "last name"
+  question_type: "text"
+  answer: ""  # Uses profile last_name
+
+- pattern: "employer"
+  question_type: "text"
+  answer: ""  # Uses profile recent_employer
+
+# --- Notice Period ---
+- pattern: "notice.*month"
+  question_type: "select"
+  answer: ""  # Uses profile notice_period_months
+
+- pattern: "notice.*week"
+  question_type: "select"
+  answer: ""  # Uses profile notice_period_weeks
+
+- pattern: "notice"
+  question_type: "select"
+  answer: ""  # Uses profile notice_period
+
+# --- Salary ---
+- pattern: "salary|compensation|ctc|pay"
+  question_type: "text"
+  answer: ""  # Uses profile desired_salary / current_ctc
+
+# --- Experience ---
+- pattern: "experience|years"
+  question_type: "text"
+  answer: ""  # Uses profile experience_map
+
+# --- Confidence ---
+- pattern: "scale.*1.*10"
+  question_type: "text"
+  answer: ""  # Uses profile confidence_level
+
+# --- Headline / Summary / Cover ---
+- pattern: "headline"
+  question_type: "textarea"
+  answer: ""  # Uses profile linkedin_headline
+
+- pattern: "summary"
+  question_type: "textarea"
+  answer: ""  # Uses profile linkedin_summary
+
+- pattern: "cover.*letter"
+  question_type: "textarea"
+  answer: ""  # Uses profile cover_letter
+
+# --- Source ---
+- pattern: "hear.*this.*job|come across.*this.*position"
+  question_type: "text"
+  answer: "https://github.com/GodsScion/Auto_job_applier_linkedIn"
+
+# --- Proficiency ---
+- pattern: "proficiency"
+  question_type: "select"
+  options: ["Beginner", "Intermediate", "Advanced", "Expert", "Professional"]
+  answer: "Professional"
+
+# --- Yes/No defaults ---
+- pattern: ".*"
+  question_type: "select"
+  options: ["Yes", "No"]
+  answer: "Yes"  # Default for yes/no questions; profile rules may override

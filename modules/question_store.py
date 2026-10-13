@@ -52,8 +52,24 @@ _GENERIC = {
     "enter", "provide", "specify", "select", "choose", "option", "field",
     "question", "answer", "required", "optional", "this", "that", "it",
     "its", "our", "their", "my", "me", "us", "them", "he", "she", "his",
-    "her", "we", "i",
+    "her", "we", "i", "do you", "have you", "are you",
 }
+
+
+def safe_similarity(a: str, b: str) -> float:
+    """
+    Jaccard similarity on content words only (strips GENERIC words).
+    Returns a value in [0.0, 1.0]. Requires both sets to be non-empty.
+    """
+    tokens_a = re.findall(r"[a-z0-9.+#/]+", a.lower())
+    tokens_b = re.findall(r"[a-z0-9.+#/]+", b.lower())
+    ca = {t for t in tokens_a if t and t not in _GENERIC}
+    cb = {t for t in tokens_b if t and t not in _GENERIC}
+    if not ca or not cb:
+        return 0.0
+    inter = ca & cb
+    union = ca | cb
+    return len(inter) / len(union)
 
 
 def _normalise(text: str) -> str:
@@ -211,13 +227,14 @@ def find_answer(
     question_text: str,
     question_type: Optional[str] = None,
     min_similarity: float = 0.4,
+    options_hash: str = "",
 ) -> Optional[tuple]:
     """
     Look up an answer for *question_text* in the store.
 
     Search order:
-      1. Exact match (case-insensitive) among approved questions.
-      2. Fuzzy match (>= min_similarity) among approved questions.
+      1. Exact match (case-insensitive) among approved questions with matching options_hash.
+      2. Fuzzy match (>= min_similarity) among approved questions with matching options_hash.
 
     Pending and rejected entries are ignored by default.
 
@@ -228,7 +245,7 @@ def find_answer(
         low_q = question_text.strip().lower()
         q_norm = _normalise(question_text)
 
-        # Pass 1: exact match on normalized text (approved only)
+        # Pass 1: exact match on normalized text (approved only, with options_hash)
         sql = """
             SELECT * FROM qa
             WHERE q_norm = ? AND status = 'approved'
@@ -237,25 +254,30 @@ def find_answer(
         if question_type:
             sql += " AND qtype = ?"
             params.append(question_type)
+        if options_hash:
+            sql += " AND options_hash = ?"
+            params.append(options_hash)
         row = conn.execute(sql, params).fetchone()
         if row:
             entry = dict(row)
             return (entry, True)
 
-        # Pass 2: fuzzy match (approved only)
-        # We need to fetch candidates and compute similarity in Python
+        # Pass 2: fuzzy match (approved only) - uses safe_similarity
         sql = "SELECT * FROM qa WHERE status = 'approved'"
         params = []
         if question_type:
             sql += " AND qtype = ?"
             params.append(question_type)
+        if options_hash:
+            sql += " AND options_hash = ?"
+            params.append(options_hash)
         rows = conn.execute(sql, params).fetchall()
 
         best_match = None
         best_score = 0.0
         for row in rows:
             entry = dict(row)
-            score = similarity(question_text, entry["q_raw"])
+            score = safe_similarity(question_text, entry["q_raw"])
             if score > best_score and score >= min_similarity:
                 best_score = score
                 best_match = entry
@@ -279,14 +301,22 @@ def save_question(
     Save a new question-answer pair. If the exact question already exists
     (same normalized text, type, and options_hash), update its answer and
     increment times_seen. Returns the saved entry dict.
+    
+    Preserves existing status unless explicitly approving (approved=True).
     """
     conn = _get_conn()
     try:
         q_raw = question_text.strip()
         q_norm = _normalise(q_raw)
         now = _now_iso()
-        status = "approved" if approved else "pending"
-
+        
+        # Preserve existing status unless explicitly approving
+        if approved:
+            status = "approved"
+        else:
+            # For updates, keep existing status; only set default for new rows
+            status = "pending"
+        
         conn.execute("""
             INSERT INTO qa (q_norm, q_raw, qtype, options_hash, answer, source, status, times_seen, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
@@ -294,7 +324,8 @@ def save_question(
                 q_raw = excluded.q_raw,
                 answer = excluded.answer,
                 source = excluded.source,
-                status = excluded.status,
+                -- Only update status if explicitly approving
+                status = CASE WHEN excluded.status = 'approved' THEN 'approved' ELSE qa.status END,
                 times_seen = qa.times_seen + 1,
                 updated_at = excluded.updated_at
         """, (q_norm, q_raw, question_type, options_hash, answer, source, status, now, now))
@@ -400,32 +431,66 @@ def delete_question(question_text: str) -> bool:
         conn.close()
 
 
+def set_last_job_id(question_text: str, job_id: str) -> bool:
+    """Record which job this answer was used for."""
+    conn = _get_conn()
+    try:
+        q_norm = _normalise(question_text.strip())
+        cur = conn.execute(
+            "UPDATE qa SET last_job_id = ?, updated_at = ? WHERE q_norm = ?",
+            (job_id, _now_iso(), q_norm)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Control panel compatibility (aliases for template fields)
+# ---------------------------------------------------------------------------
+
+def _row_to_panel_format(row: dict) -> dict:
+    """Convert DB row to control panel format with expected field names."""
+    return {
+        "question": row.get("q_raw", ""),
+        "question_type": row.get("qtype", "text"),
+        "approved": row.get("status") == "approved",
+        "answer": row.get("answer", ""),
+        "source": row.get("source", ""),
+        "times_seen": row.get("times_seen", 1),
+        "created_at": row.get("created_at", ""),
+        "updated_at": row.get("updated_at", ""),
+        "options_hash": row.get("options_hash", ""),
+    }
+
+
 def get_all_questions() -> list:
-    """Return the full list of saved questions."""
+    """Return the full list of saved questions in control panel format."""
     conn = _get_conn()
     try:
         rows = conn.execute("SELECT * FROM qa ORDER BY created_at DESC").fetchall()
-        return [dict(r) for r in rows]
+        return [_row_to_panel_format(dict(r)) for r in rows]
     finally:
         conn.close()
 
 
 def get_pending_questions() -> list:
-    """Return questions awaiting approval."""
+    """Return questions awaiting approval in control panel format."""
     conn = _get_conn()
     try:
         rows = conn.execute("SELECT * FROM qa WHERE status = 'pending' ORDER BY created_at DESC").fetchall()
-        return [dict(r) for r in rows]
+        return [_row_to_panel_format(dict(r)) for r in rows]
     finally:
         conn.close()
 
 
 def get_approved_questions() -> list:
-    """Return approved questions."""
+    """Return approved questions in control panel format."""
     conn = _get_conn()
     try:
         rows = conn.execute("SELECT * FROM qa WHERE status = 'approved' ORDER BY created_at DESC").fetchall()
-        return [dict(r) for r in rows]
+        return [_row_to_panel_format(dict(r)) for r in rows]
     finally:
         conn.close()
 

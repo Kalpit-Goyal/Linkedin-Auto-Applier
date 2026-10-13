@@ -40,6 +40,7 @@ from config.questions import *
 from config.search import *
 from config.secrets import use_AI, username, password, ai_provider
 from config.settings import *
+from config.profile import email_address  # for answering module
 
 from modules.open_chrome import *
 from modules.helpers import *
@@ -48,11 +49,11 @@ from modules.validator import validate_config
 from modules.session import load_linkedin_cookies, save_linkedin_cookies, has_saved_cookies
 from modules import newui, jobcard
 
-from modules.question_store import find_answer as qa_find, save_question as qa_save, record as qa_record
+from modules.question_store import record as qa_record, set_last_job_id, mark_job_answers_unverified
 from modules.answering import resolve_answer, record_answer
 
 if use_AI:
-    from modules.ai.connections import create_ai_client, extract_skills, answer_question, close_ai_client
+    from modules.ai.connections import create_ai_client, extract_skills, close_ai_client
 
 from typing import Literal
 
@@ -74,7 +75,6 @@ last_name = last_name.strip()
 full_name = first_name + " " + middle_name + " " + last_name if middle_name else first_name + " " + last_name
 
 useNewResume = True
-randomly_answered_questions = set()
 
 tabs_count = 1
 easy_applied_count = 0
@@ -683,10 +683,10 @@ def _closest_option(answer: str, options: list) -> str | None:
     return best
 
 
-# Function to answer the questions for Easy Apply - now using resolve_answer pipeline
+# Function to answer the questions for Easy Apply - using resolve_answer pipeline
 def answer_questions(modal: WebElement, questions_list: set, work_location: str, job_description: str | None = None ) -> set:
-    # Get all questions from the page using the new resolve_answer pipeline
     from modules.answering import resolve_answer, record_answer
+    from modules.question_store import set_last_job_id
     
     # Get all questions from the page
     # The classic form marked every question with `data-test-form-element`; the SDUI
@@ -726,432 +726,178 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
     # all_single_line_questions = modal.find_elements(By.XPATH, ".//div[@data-test-single-line-text-form-component]")
     # all_questions = all_questions + all_list_questions + all_single_line_questions
 
-    for Question in all_questions():
-        # Get question type using resolve_answer pipeline
-        from modules.answering import resolve_answer
-        question_type, answer, options = resolve_answer(
-            "placeholder",
-            None,
-        )
-        if select:
-            label_org = ""
-            try:
-                label = Question.find_element(By.TAG_NAME, "label")
-                # The classic markup wraps the text in a span; the SDUI dropdown
-                # puts it straight in the label, so a missing span must not lose it.
-                try:
-                    label_org = label.find_element(By.TAG_NAME, "span").text
-                except Exception:
-                    label_org = label.text
-            except: pass
-            label_org = (label_org or "").strip()
-            if not label_org or _COUNTER_LINE.match(label_org):
-                # A dropdown can keep its question next to its wrapper instead of in a
-                # label element, and its label element can be the character counter's.
-                label_org = _question_text(Question, select)
-            if not label_org: label_org = "Unknown"
-            answer = 'Yes'
-            label = label_org.lower()
-            select = Select(select)
-            selected_option = select.first_selected_option.text
-            optionsText = []
-            options = '"List of phone country codes"'
-            if label.strip("* ") != "phone country code":
-                optionsText = [option.text for option in select.options]
-                options = "".join([f' "{option}",' for option in optionsText])
-            prev_answer = selected_option
-            if overwrite_previous_answers or selected_option == "Select an option":
-                # Pick a sensible answer for the dropdown from the question label.
-                # The options decide as much as the label: a dropdown offering "Yes"
-                # and "No" takes the stance from config, while a dropdown of numbers
-                # (notice period, experience, salary) takes the configured number -
-                # asking the label alone answered "Yes" to a notice-period dropdown,
-                # which matched nothing and fell through to a random "60 Days".
-                lowered_options = [option.strip().lower() for option in optionsText]
-                if 'email' in label or 'phone' in label:
-                    answer = prev_answer
-                elif 'yes' in lowered_options and 'no' in lowered_options:
-                    if 'citizenship' in label or 'employment eligibility' in label: answer = us_citizenship
-                    elif 'veteran' in label or 'protected' in label: answer = veteran_status
-                    elif 'disability' in label or 'handicapped' in label: answer = disability_status
-                    elif 'gender' in label or 'sex' in label: answer = gender
-                    else: answer = answer_common_questions(label, answer)
-                elif 'gender' in label or 'sex' in label:
-                    answer = gender
-                elif 'disability' in label:
-                    answer = disability_status
-                elif 'proficiency' in label:
-                    answer = 'Professional'
-                elif 'notice' in label:
-                    if 'month' in label:
-                        answer = notice_period_months
-                    elif 'week' in label:
-                        answer = notice_period_weeks
-                    else: answer = notice_period
-                elif 'experience' in label or 'years' in label:
-                    answer = str(years_of_experience)
-                elif 'salary' in label or 'compensation' in label or 'ctc' in label or 'pay' in label:
-                    answer = str(current_ctc if ('current' in label or 'present' in label) else desired_salary)
-                elif any(term in label for term in ['location', 'city', 'state', 'country']):
-                    if 'country' in label:
-                        answer = country
-                    elif 'state' in label:
-                        answer = state
-                    elif 'city' in label:
-                        answer = current_city if current_city else work_location
-                    else:
-                        answer = work_location
-                else:
-                    answer = answer_common_questions(label, answer)
-                # The control panel writes numbers as JSON numbers; the dropdown only
-                # takes text, and `answer.lower()` below only exists on strings.
-                answer = str(answer)
-                try:
-                    select.select_by_visible_text(answer)
-                except NoSuchElementException:
-                    # The exact text isn't an option; map our answer onto the nearest option.
-                    lower_answer = answer.lower()
-                    if answer == 'Decline':
-                        candidate_phrases = ["Decline", "not wish", "don't wish", "Prefer not", "not want"]
-                    elif 'yes' in lower_answer:
-                        candidate_phrases = ["Yes", "Agree", "I do", "I have"]
-                    elif 'no' in lower_answer:
-                        candidate_phrases = ["No", "Disagree", "I don't", "I do not"]
-                    else:
-                        candidate_phrases = [answer, lower_answer, answer.upper(),
-                                             ''.join(ch for ch in answer if ch.isalnum())]
-                    matched = False
-                    for phrase in candidate_phrases:
-                        low_phrase = phrase.lower()
-                        for option in optionsText:
-                            low_option = option.lower()
-                            if low_phrase in low_option or low_option in low_phrase:
-                                select.select_by_visible_text(option)
-                                answer = option
-                                matched = True
-                                break
-                        if matched:
-                            break
-                    if not matched:
-                        # A number the dropdown does not list verbatim lands on the
-                        # closest number it does list before anything is taken at random.
-                        closest = _closest_option(answer, optionsText)
-                        if closest:
-                            print_lg(f'"{answer}" is not an option for "{label_org}", using the nearest option "{closest}".')
-                            select.select_by_visible_text(closest)
-                            answer = closest
-                        else:
-                            print_lg(f'No option matched "{answer}" for "{label_org}", picking one at random.')
-                            select.select_by_index(randint(1, len(select.options) - 1))
-                            answer = select.first_selected_option.text
-                            randomly_answered_questions.add((f'{label_org} [ {options} ]', "select"))
-            questions_list.add((f'{label_org} [ {options} ]', answer, "select", prev_answer))
-            continue
-        
-        # Check if it's a radio / choice question
-        # The classic form groups the options under a fieldset carrying a data-test
-        # attribute. The SDUI form carries no such attribute, so the group is also
-        # found structurally, and - having no title span to read - the question text
-        # is taken from the group's first line, the same way the text fields' is.
+    for Question in all_questions:
+        # Detect control type and extract label/options
+        select = try_xp(Question, ".//select", False)
         radio = try_xp(Question, './/fieldset[@data-test-form-builder-radio-button-form-component="true"]', False)
         if not radio:
             radio = _choice_group(Question)
-        if radio:
-            prev_answer = None
+        text = try_xp(Question, ".//input[@type='text' or @type='tel' or @type='email' or not(@type)]", False)
+        text_area = try_xp(Question, ".//textarea", False)
+        checkbox = try_xp(Question, ".//input[@type='checkbox']", False)
+        
+        question_type = None
+        options = None
+        label_org = "Unknown"
+        control = None
+        
+        if select:
+            question_type = "select"
+            control = select
+            options = [option.text for option in select.options]
+            # Get label
+            label = try_xp(Question, ".//label[@for]", False) or try_xp(Question, ".//label", False)
+            if label:
+                label_org = (label.text or "").strip()
+                if not label_org or _COUNTER_LINE.match(label_org):
+                    label_org = _question_text(Question, select)
+            if not label_org or _COUNTER_LINE.match(label_org):
+                label_org = "Unknown"
+                
+        elif radio:
+            question_type = "radio"
+            control = radio
+            options = []
+            for opt in radio.find_elements(By.XPATH, './/input[@type="radio"]'):
+                opt_label = _radio_option_label(radio, opt)
+                options.append(opt_label)
+            # Get label
             label = try_xp(radio, './/span[@data-test-form-builder-radio-button-form-component__title]', False)
             try: label = find_by_class(label, "visually-hidden", 2.0)
             except: pass
-            label_org = label.text if label else ""
+            if label:
+                label_org = label.text
             if not label_org or _COUNTER_LINE.match(label_org):
-                # The title span is missing on the SDUI form, so the question comes from
-                # the group's own first line - or, when the group starts at its first
-                # option, from the paragraph sitting next to the group instead.
                 label_org = _question_text(radio)
             if not label_org: label_org = "Unknown"
-            answer = 'Yes'
-            label = label_org.lower()
-
-            label_org += ' [ '
-            # Only the radios: the group's wrapper can carry other inputs, and the
-            # answer is matched onto `options[i]` by position, so anything else in
-            # here would shift the options off their labels.
-            options = radio.find_elements(By.XPATH, './/input[@type="radio"]')
-            if not options:
-                print_lg(f'This choice question offers no radio options, leaving it alone: {label_org}')
-                questions_list.add((label_org, "unanswered", "radio", None))
-                continue
-            options_labels = []
-            
-            for option in options:
-                option_label = _radio_option_label(radio, option)
-                options_labels.append( f'"{option_label}"<{option.get_attribute("value")}>' ) # Saving option as "label <value>"
-                if option.is_selected(): prev_answer = options_labels[-1]
-                label_org += f' {options_labels[-1]},'
-
-            if overwrite_previous_answers or prev_answer is None:
-                if 'citizenship' in label or 'employment eligibility' in label: answer = us_citizenship
-                elif 'veteran' in label or 'protected' in label: answer = veteran_status
-                elif 'disability' in label or 'handicapped' in label: 
-                    answer = disability_status
-                else: answer = answer_common_questions(label,answer)
-                foundOption = try_xp(radio, f".//label[normalize-space()='{answer}']", False)
-                if foundOption: 
-                    actions.move_to_element(foundOption).click().perform()
-                else:    
-                    possible_answer_phrases = ["Decline", "not wish", "don't wish", "Prefer not", "not want"] if answer == 'Decline' else [answer]
-                    ele = options[0]
-                    answer = options_labels[0]
-                    for phrase in possible_answer_phrases:
-                        for i, option_label in enumerate(options_labels):
-                            if phrase in option_label:
-                                foundOption = options[i]
-                                ele = foundOption
-                                answer = f'Decline ({option_label})' if len(possible_answer_phrases) > 1 else option_label
-                                break
-                        if foundOption: break
-                    # if answer == 'Decline':
-                    #     answer = options_labels[0]
-                    #     for phrase in ["Prefer not", "not want", "not wish"]:
-                    #         foundOption = try_xp(radio, f".//label[normalize-space()='{phrase}']", False)
-                    #         if foundOption:
-                    #             answer = f'Decline ({phrase})'
-                    #             ele = foundOption
-                    #             break
-                    actions.move_to_element(ele).click().perform()
-                    if not foundOption: randomly_answered_questions.add((f'{label_org} ]',"radio"))
-            else: answer = prev_answer
-            questions_list.add((label_org+" ]", answer, "radio", prev_answer))
-            continue
-        
-        # Check if it's a text question
-        # The SDUI text field is an `<input>` with no type at all (the location
-        # typeahead) or type="tel", so matching type="text" alone left the required
-        # city unfilled and the Next button sitting on a validation error.
-        text = try_xp(Question, ".//input[@type='text' or @type='tel' or @type='email' or not(@type)]", False)
-        if text: 
-            do_actions = False
+                
+        elif text:
+            question_type = "text"
+            control = text
+            # Get label
             label = try_xp(Question, ".//label[@for]", False) or try_xp(Question, ".//label", False)
             try: label = label.find_element(By.CLASS_NAME,'visually-hidden')
             except: pass
-            try:
-                label_org = (label.text or "").strip() if label else ""
-            except Exception:
-                label_org = ""
+            if label:
+                label_org = (label.text or "").strip()
             if not label_org or _COUNTER_LINE.match(label_org):
-                # The label element is missing (the location typeahead keeps its
-                # question in a paragraph next to its wrapper) or is the character
-                # counter's own label - the control and the wrapper are asked instead.
                 label_org = _question_text(Question, text)
-            if not label_org or _COUNTER_LINE.match(label_org):
-                # Typing a default into a field whose question nobody could read is
-                # how every unreadable field ends up with the same answer, whatever
-                # the default happens to be this time. The field is left alone and
-                # the step is saved so its markup can be read instead.
-                try: preview = " ".join((Question.text or "").split())[:200]
-                except Exception: preview = "<unreadable>"
-                print_lg(f"This question's text could not be read, so it is left unanswered: {preview}")
-                _capture_unreadable_form()
-                questions_list.add(("Unreadable question", "", "text", ""))
-                continue
-            answer = "" # years_of_experience
-            label = label_org.lower()
-
-            prev_answer = text.get_attribute("value")
-            if not prev_answer or overwrite_previous_answers:
-                # --- Check Q&A store first for a saved answer ---
-                qa_result = qa_find(label_org, question_type="text")
-                if qa_result:
-                    qa_entry, qa_exact = qa_result
-                    answer = qa_entry["answer"]
-                    print_lg(f'Q&A store ({"exact" if qa_exact else "fuzzy"}): "{label_org}" -> "{answer}"')
-                    if not qa_exact:
-                        qa_save(label_org, answer, question_type="text", source="fuzzy_match", approved=False)
-                        print_lg(f'Q&A store: Fuzzy match saved as pending for review: "{label_org}"')
-                elif 'experience' in label or 'years' in label: answer = years_of_experience
-                elif 'phone' in label or 'mobile' in label: answer = phone_number
-                elif 'street' in label: answer = street
-                elif 'city' in label or 'location' in label or 'address' in label:
-                    answer = current_city if current_city else work_location
-                    do_actions = True
-                elif 'signature' in label: answer = full_name # 'signature' in label or 'legal name' in label or 'your name' in label or 'full name' in label: answer = full_name     # What if question is 'name of the city or university you attend, name of referral etc?'
-                elif 'name' in label:
-                    if 'full' in label: answer = full_name
-                    elif 'first' in label and 'last' not in label: answer = first_name
-                    elif 'middle' in label and 'last' not in label: answer = middle_name
-                    elif 'last' in label and 'first' not in label: answer = last_name
-                    elif 'employer' in label: answer = recent_employer
-                    else: answer = full_name
-                elif 'notice' in label:
-                    if 'month' in label:
-                        answer = notice_period_months
-                    elif 'week' in label:
-                        answer = notice_period_weeks
-                    else: answer = notice_period
-                elif 'salary' in label or 'compensation' in label or 'ctc' in label or 'pay' in label: 
-                    if 'current' in label or 'present' in label:
-                        if 'month' in label:
-                            answer = current_ctc_monthly
-                        elif 'lakh' in label:
-                            answer = current_ctc_lakhs
-                        else:
-                            answer = current_ctc
-                    else:
-                        if 'month' in label:
-                            answer = desired_salary_monthly
-                        elif 'lakh' in label:
-                            answer = desired_salary_lakhs
-                        else:
-                            answer = desired_salary
-                elif 'linkedin' in label: answer = linkedIn
-                elif 'website' in label or 'blog' in label or 'portfolio' in label or 'link' in label: answer = website
-                elif 'scale of 1-10' in label: answer = confidence_level
-                elif 'headline' in label: answer = linkedin_headline
-                elif ('hear' in label or 'come across' in label) and 'this' in label and ('job' in label or 'position' in label): answer = "https://github.com/GodsScion/Auto_job_applier_linkedIn"
-                elif 'state' in label or 'province' in label: answer = state
-                elif 'zip' in label or 'postal' in label or 'code' in label: answer = zipcode
-                elif 'country' in label: answer = country
-                else: answer = answer_common_questions(label,answer)
-                if answer == "":
-                    ai_answer = ""
-                    if use_AI and aiClient:
-                        try:
-                            ai_answer = answer_question(aiClient, label_org, question_type="text", job_description=job_description, user_information_all=user_information_all)
-                        except Exception as e:
-                            print_lg("Failed to get AI answer!", e)
-                    if ai_answer and isinstance(ai_answer, str) and ai_answer.strip():
-                        answer = ai_answer.strip()
-                        print_lg(f'AI answered "{label_org}": "{answer}"')
-                        qa_save(label_org, answer, question_type="text", source="ai_saved", approved=False)
-                    else:
-                        randomly_answered_questions.add((label_org, "text"))
-                        answer = years_of_experience
-                text.clear()
-                text.send_keys(answer)
-                if do_actions:
-                    sleep(2)
-                    actions.send_keys(Keys.ARROW_DOWN)
-                    actions.send_keys(Keys.ENTER).perform()
-            questions_list.add((label, text.get_attribute("value"), "text", prev_answer))
-            continue
-
-        # Check if it's a textarea question
-        text_area = try_xp(Question, ".//textarea", False)
-        if text_area:
+            if not label_org: label_org = "Unknown"
+                
+        elif text_area:
+            question_type = "textarea"
+            control = text_area
+            # Get label
             label = try_xp(Question, ".//label[@for]", False)
-            label_org = label.text if label else ""
+            if label:
+                label_org = label.text
             if not label_org or _COUNTER_LINE.match(label_org):
-                # Same as the single-line fields: a missing label element, or a label
-                # that is only a character counter, falls back to the wrapper's text.
                 label_org = _question_text(Question, text_area)
             if not label_org: label_org = "Unknown"
-            label = label_org.lower()
-            answer = ""
-            prev_answer = text_area.get_attribute("value")
-            if not prev_answer or overwrite_previous_answers:
-                # --- Check Q&A store first for a saved answer ---
-                qa_result = qa_find(label_org, question_type="textarea")
-                if qa_result:
-                    qa_entry, qa_exact = qa_result
-                    answer = qa_entry["answer"]
-                    print_lg(f'Q&A store ({"exact" if qa_exact else "fuzzy"}): "{label_org}" -> "{answer}"')
-                    if not qa_exact:
-                        qa_save(label_org, answer, question_type="textarea", source="fuzzy_match", approved=False)
-                        print_lg(f'Q&A store: Fuzzy match saved as pending for review: "{label_org}"')
-                elif 'summary' in label: answer = linkedin_summary
-                elif 'cover' in label: answer = cover_letter
-                if answer == "":
-                    ai_answer = ""
-                    if use_AI and aiClient:
-                        try:
-                            ai_answer = answer_question(aiClient, label_org, question_type="textarea", job_description=job_description, user_information_all=user_information_all)
-                        except Exception as e:
-                            print_lg("Failed to get AI answer!", e)
-                    if ai_answer and isinstance(ai_answer, str) and ai_answer.strip():
-                        answer = ai_answer.strip()
-                        print_lg(f'AI answered "{label_org}": "{answer}"')
-                        qa_save(label_org, answer, question_type="textarea", source="ai_saved", approved=False)
-                    else:
-                        randomly_answered_questions.add((label_org, "textarea"))
-            text_area.clear()
-            text_area.send_keys(answer)
-            if do_actions:
-                    sleep(2)
-                    actions.send_keys(Keys.ARROW_DOWN)
-                    actions.send_keys(Keys.ENTER).perform()
-            questions_list.add((label, text_area.get_attribute("value"), "textarea", prev_answer))
-            continue
-
-        # Check if it's a checkbox question
-        checkbox = try_xp(Question, ".//input[@type='checkbox']", False)
-        if checkbox:
+                
+        elif checkbox:
+            question_type = "checkbox"
+            control = checkbox
+            # Get label
             label = try_xp(Question, ".//span[@class='visually-hidden']", False)
             label_org = label.text if label else "Unknown"
-            label = label_org.lower()
-            answer = try_xp(Question, ".//label[@for]", False)  # Sometimes multiple checkboxes are given for 1 question, Not accounted for that yet
-            answer = answer.text if answer else "Unknown"
-            prev_answer = checkbox.is_selected()
-            checked = prev_answer
-            if not prev_answer:
-                try:
-                    actions.move_to_element(checkbox).click().perform()
-                    checked = True
-                except Exception as e: 
-                    print_lg("Checkbox click failed!", e)
-                    pass
-            questions_list.add((f'{label} ([X] {answer})', checked, "checkbox", prev_answer))
+        else:
+            # Unknown question type - log and continue
+            try: preview = " ".join(Question.text.split())
+            except Exception: preview = "<unreadable>"
+            print_lg(f"This question was not recognised and was left unanswered: {preview[:300]}")
             continue
-
-        # Nothing above matched this wrapper. It is reported rather than passed over
-        # in silence: a question left unanswered is what keeps Next sitting on a
-        # validation error, and the wrapper's own text is what identifies the control
-        # this loop would have to be taught next.
-        try: preview = " ".join(Question.text.split())
-        except Exception: preview = "<unreadable>"
-        print_lg(f"This question was not recognised and was left unanswered: {preview[:300]}")
-
-
-    # Select todays date
-    try_xp(driver, "//button[contains(@aria-label, 'This is today')]")
-
-    # Collect important skills
-    # if 'do you have' in label and 'experience' in label and ' in ' in label -> Get word (skill) after ' in ' from label
-    # if 'how many years of experience do you have in ' in label -> Get word (skill) after ' in '
-
-    return questions_list
-
-
-
-
-def external_apply(pagination_element: WebElement, job_id: str, job_link: str, resume: str, date_listed, application_link: str, screenshot_name: str) -> tuple[bool, str, int]:
-    '''
-    Function to open new tab and save external job application links
-    '''
-    global tabs_count, dailyEasyApplyLimitReached
-    if easy_apply_only:
+        
+        if not label_org or _COUNTER_LINE.match(label_org):
+            label_org = "Unknown"
+        
+        # Resolve answer using the pipeline
+        job_link = driver.current_url if driver else None
+        answer, source = resolve_answer(
+            label_org,
+            question_type,
+            options=options,
+            job_description=job_description,
+            job_link=job_link,
+        )
+        
+        # Handle answer based on source
+        if source == "skip":
+            final_answer = ""
+            print_lg(f"Skipping question (no answer): {label_org}")
+        elif source == "pause":
+            final_answer = None
+            print_lg(f"Pause required for: {label_org}")
+        else:
+            final_answer = answer if answer else ""
+            # Record the answer in the store
+            record_answer(
+                label_org,
+                final_answer,
+                question_type,
+                options=options if question_type in ("select", "radio") else None,
+                source=source,
+                approved=(source in ("bank", "store_exact", "store_fuzzy", "profile_rule")),
+            )
+            print_lg(f"Answered '{label_org}' ({question_type}): {final_answer} [source: {source}]")
+        
+        # Fill the field
+        if question_type == "select" and control:
+            select = Select(control)
+            selected_option = select.first_selected_option.text
+            if overwrite_previous_answers or selected_option == "Select an option":
+                if final_answer:
+                    try:
+                        select.select_by_visible_text(final_answer)
+                    except NoSuchElementException:
+                        # Try to match option
+                        matched = _match_option_fallback(final_answer, [opt.text for opt in select.options])
+                        if matched:
+                            select.select_by_visible_text(matched)
+                            final_answer = matched
+            questions_list.add((f'{label_org} [ {", ".join(options) if options else ""} ]', final_answer or "Select an option", "select", None))
+            
+        elif question_type == "radio" and control:
+            if final_answer:
+                # Match and click the radio option
+                matched_opt = None
+                for opt in control.find_elements(By.XPATH, './/input[@type="radio"]'):
+                    opt_label = _radio_option_label(control, opt)
+                    if opt_label == final_answer:
+                        matched_opt = opt
+                        break
+                if matched_opt:
+                    actions.move_to_element(matched_opt).click().perform()
+            questions_list.add((f'{label_org} ]', final_answer or "unanswered", "radio", None))
+            
+        elif question_type in ("text", "textarea") and control:
+            if final_answer is not None:
+                control.clear()
+                control.send_keys(final_answer)
+                # Handle location typeahead
+                if final_answer and ('city' in label_org.lower() or 'location' in label_org.lower()):
+                    from time import sleep
+                    sleep(1)
+                    actions.send_keys(Keys.ARROW_DOWN).send_keys(Keys.ENTER).perform()
+            questions_list.add((label_org, final_answer or "", question_type, None))
+            
+        elif question_type == "checkbox" and control:
+            if final_answer:
+                if not control.is_selected():
+                    actions.move_to_element(control).click().perform()
+            questions_list.add((f'{label_org} ([X] {final_answer or "Unknown"})', bool(final_answer), "checkbox", None))
+        
+        # Record the job_id for this answer (for later verification)
+        # Get job_id from current URL or context
         try:
-            if "exceeded the daily application limit" in driver.find_element(By.CLASS_NAME, "artdeco-inline-feedback__message").text: dailyEasyApplyLimitReached = True
-        except: pass
-        print_lg("Easy apply failed I guess!")
-        if pagination_element != None: return True, application_link, tabs_count
-    try:
-        wait.until(EC.element_to_be_clickable((By.XPATH, ".//button[contains(@class,'jobs-apply-button') and contains(@class, 'artdeco-button--3')]"))).click() # './/button[contains(span, "Apply") and not(span[contains(@class, "disabled")])]'
-        wait_span_click(driver, "Continue", 1, True, False)
-        windows = driver.window_handles
-        tabs_count = len(windows)
-        driver.switch_to.window(windows[-1])
-        application_link = driver.current_url
-        print_lg('Got the external application link "{}"'.format(application_link))
-        if close_tabs and driver.current_window_handle != linkedIn_tab: driver.close()
-        driver.switch_to.window(linkedIn_tab)
-        return False, application_link, tabs_count
-    except Exception as e:
-        # print_lg(e)
-        print_lg("Failed to apply!")
-        failed_job(job_id, job_link, resume, date_listed, "Probably didn't find Apply button or unable to switch tabs.", e, application_link, screenshot_name)
-        global failed_count
-        failed_count += 1
-        return True, application_link, tabs_count
-
+            job_id_match = re.search(r'/jobs/view/(\d+)', driver.current_url)
+            if job_id_match:
+                job_id = job_id_match.group(1)
+                set_last_job_id(label_org, job_id)
+        except:
+            pass
+    
+    return questions_list
 
 
 def follow_company(modal: WebDriver = driver) -> None:
@@ -1481,6 +1227,7 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                             # print_lg(e)
                             critical_error_log("Somewhere in Easy Apply process",e)
                             failed_job(job_id, job_link, resume, date_listed, "Problem in Easy Applying", e, application_link, screenshot_name)
+                            mark_job_answers_unverified(job_id)
                             failed_count += 1
                             discard_job()
                             continue
@@ -1742,6 +1489,7 @@ def apply_to_current_results() -> None:
                     # print_lg(e)
                     critical_error_log("Somewhere in Easy Apply process", e)
                     failed_job(job_id, job_link, resume, date_listed, "Problem in Easy Applying", e, application_link, screenshot_name)
+                    mark_job_answers_unverified(job_id)
                     failed_count += 1
                     newui.discard_application(driver, root=modal, actions=actions)
                     continue
@@ -1834,7 +1582,8 @@ chatGPT_tab = False
 linkedIn_tab = False
 
 def main() -> None:
-    pyautogui.alert("Please consider sponsoring this project at:\n\nhttps://github.com/sponsors/GodsScion\n\n", "Support the project", "Okay")
+    # Sponsor alert gated behind setting - set show_sponsor_alert = True in config to enable
+    # pyautogui.alert("Please consider sponsoring this project at:\n\nhttps://github.com/sponsors/GodsScion\n\n", "Support the project", "Okay")
     total_runs = 1
     try:
         global linkedIn_tab, tabs_count, useNewResume, aiClient
@@ -1914,7 +1663,6 @@ def main() -> None:
         print_lg("Total applied or collected:     {}".format(easy_applied_count + external_jobs_count))
         print_lg("\nFailed jobs:                    {}".format(failed_count))
         print_lg("Irrelevant jobs skipped:        {}\n".format(skip_count))
-        if randomly_answered_questions: print_lg("\n\nQuestions randomly answered:\n  {}  \n\n".format(";\n".join(str(question) for question in randomly_answered_questions)))
         quotes = choice([
             "Never quit. You're one step closer than before. - Sai Vignesh Golla", 
             "All the best with your future interviews, you've got this. - Sai Vignesh Golla", 

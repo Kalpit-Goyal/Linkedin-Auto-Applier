@@ -137,6 +137,17 @@ experience_map = {
 # If False, pause for manual intervention (respects pause_at_failed_question).
 skip_job_if_unanswered = True
 
+# Dedicated email field for email questions (defaults to LinkedIn URL if not set)
+email_address = ""
+
+# Computed values (populated at runtime from base values in runAiBot.py)
+notice_period_months = ""
+notice_period_weeks = ""
+desired_salary_monthly = ""
+current_ctc_monthly = ""
+desired_salary_lakhs = ""
+current_ctc_lakhs = ""
+
 ##
 
 
