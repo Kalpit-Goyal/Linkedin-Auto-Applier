@@ -597,6 +597,34 @@
             addForm.appendChild(addBtn);
             panel.appendChild(addForm);
 
+            // AI Quick Ask
+            var aiAsk = el('div', { class: 'qa-add-form qa-card' });
+            aiAsk.appendChild(el('h3', { text: 'AI Quick Ask (test model)', style: 'margin:0 0 8px;font-size:15px;' }));
+            var aiQ = el('input', { type: 'text', id: 'ai-test-q', placeholder: 'Ask the AI model...' });
+            var aiOpts = el('input', { type: 'text', id: 'ai-test-opts', placeholder: 'Options (comma-separated, optional)' });
+            var aiType = el('select', { id: 'ai-test-type' });
+            ['text', 'textarea', 'single_select', 'multiple_select'].forEach(function (t) {
+                var opt = el('option', { value: t, text: t });
+                if (t === 'text') opt.selected = true;
+                aiType.appendChild(opt);
+            });
+            var aiJob = el('textarea', { id: 'ai-test-job', placeholder: 'Job description (optional)...', style: 'min-height:40px;' });
+            var aiAbout = el('textarea', { id: 'ai-test-about', placeholder: 'About company (optional)...', style: 'min-height:40px;' });
+            var aiUser = el('textarea', { id: 'ai-test-user', placeholder: 'User info (optional)...', style: 'min-height:40px;' });
+            var aiAskBtn = el('button', { class: 'btn', type: 'button', text: 'Ask AI' });
+            aiAskBtn.addEventListener('click', askAIQuick);
+            var aiResp = el('textarea', { id: 'ai-test-resp', placeholder: 'AI response will appear here...', style: 'min-height:60px;', readonly: true });
+            aiAsk.appendChild(aiQ);
+            aiAsk.appendChild(aiOpts);
+            aiAsk.appendChild(aiType);
+            aiAsk.appendChild(aiJob);
+            aiAsk.appendChild(aiAbout);
+            aiAsk.appendChild(aiUser);
+            aiAsk.appendChild(aiAskBtn);
+            aiAsk.appendChild(aiResp);
+            panel.appendChild(aiAsk);
+
+
             var holder = el('div', { id: 'qaHolder' });
             holder.appendChild(el('p', { class: 'qa-empty', text: 'Loading questions...' }));
             panel.appendChild(holder);
@@ -728,6 +756,41 @@
                 q.value = '';
                 a.value = '';
                 loadQuestions();
+            });
+        }
+
+        function askAIQuick() {
+            var q = document.getElementById('ai-test-q');
+            var optsEl = document.getElementById('ai-test-opts');
+            var t = document.getElementById('ai-test-type');
+            var job = document.getElementById('ai-test-job');
+            var about = document.getElementById('ai-test-about');
+            var user = document.getElementById('ai-test-user');
+            var resp = document.getElementById('ai-test-resp');
+            if (!q || !resp) return;
+            var question = q.value.trim();
+            if (!question) { resp.value = 'Please enter a question.'; return; }
+            var options = null;
+            var optv = optsEl.value.trim();
+            if (optv) {
+                options = optv.split(',').map(function (x) { return x.trim(); }).filter(function (x) { return x.length > 0; });
+            }
+            resp.value = 'Thinking...';
+            fetch('/api/ai/answer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    question: question,
+                    options: options,
+                    question_type: t.value,
+                    job_description: job.value.trim() || null,
+                    about_company: about.value.trim() || null,
+                    user_information_all: user.value.trim() || null
+                })
+            }).then(function (r) { return r.json(); }).then(function (d) {
+                resp.value = (d.answer === null || d.answer === undefined) ? (d.error || JSON.stringify(d)) : d.answer;
+            }).catch(function (e) {
+                resp.value = 'Error: ' + e;
             });
         }
 

@@ -213,6 +213,19 @@ def test_the_modal_is_never_resolved_to_the_body():
     assert "body" not in newui.MODAL_CANDIDATES
 
 
+def test_the_modal_is_matched_by_the_selector_the_capture_verified():
+    '''
+    The SDUI flow's modal is a native `<dialog data-testid="dialog">` in the top
+    document. A native dialog has an implicit role but no `role` attribute, so the
+    `[role='dialog']` candidate that used to lead this list never matched it: the bot
+    clicked Easy Apply, the form opened on screen, and the run reported the modal as
+    missing - so nothing ever looked for Next.
+    '''
+    assert selectors.EASY_APPLY_MODAL[0] == "dialog[data-testid='dialog']"
+    assert "dialog" in selectors.EASY_APPLY_MODAL
+    assert newui.MODAL_CANDIDATES[0] == "dialog[data-testid='dialog']"
+
+
 def test_opening_easy_apply_reports_failure_when_no_modal_appears(monkeypatch):
     install(monkeypatch, {selectors.EASY_APPLY_BUTTON[0]: [FakeNode()]})
     assert newui.open_easy_apply(None, time=0) is False
@@ -350,3 +363,69 @@ def test_a_page_turn_that_does_not_happen_is_reported(monkeypatch):
         },
     )
     assert newui.go_to_next_page(None, page=1) is False
+
+
+# ---------------------------------------------------------------- advancing the flow
+
+
+class LabelRecorder:
+    '''Stands in for `find_by_label` with the texts that are actually on screen.'''
+
+    def __init__(self, present=()):
+        self.present = {str(text).strip().lower() for text in present}
+        self.asked = []
+
+    def find(self, driver, label, root=None, time=4.0):
+        self.asked.append(label)
+        return FakeNode() if str(label).strip().lower() in self.present else False
+
+
+def labels(monkeypatch, present=()):
+    recorder = LabelRecorder(present)
+    monkeypatch.setattr(newui, "find_by_label", recorder.find)
+    return recorder
+
+
+def test_the_verified_next_button_is_clicked_before_any_text_is_searched(monkeypatch):
+    '''
+    `continue-unify` is the view name the capture verified, so it is tried first and
+    the text search - which cannot see what is on screen before it looks - is the
+    fallback for markup nobody has captured yet.
+    '''
+    recorder = install(monkeypatch, {selectors.APPLY_NEXT_BUTTON[0]: [FakeNode()]})
+    found = labels(monkeypatch)
+    assert newui.advance(None, None, "Next") is True
+    assert recorder.clicked
+    assert not found.asked
+
+
+def test_next_falls_back_to_a_button_the_flow_has_relabelled(monkeypatch):
+    '''
+    The step before submission reads "Review", not "Next". A loop that only ever asked
+    for "Next" stopped there, found nothing, and went on to look for a Submit button
+    that only exists one screen later - so the application was discarded as unfinished.
+    '''
+    install(monkeypatch)
+    found = labels(monkeypatch, present=["Review"])
+    assert newui.advance(None, None, "Next") is True
+    assert found.asked == list(selectors.APPLY_NEXT_STEPS)
+
+
+def test_a_request_for_next_never_submits_the_application(monkeypatch):
+    '''
+    "Submit application" sits in the flow's own list because the classic flow searched
+    for it by name, but it must never answer a request for Next: the caller clicks it
+    once, after the review screen.
+    '''
+    assert "Submit application" not in selectors.APPLY_NEXT_STEPS
+    install(monkeypatch)
+    found = labels(monkeypatch, present=["Submit application"])
+    assert newui.advance(None, None, "Next") is False
+    assert "Submit application" not in found.asked
+
+
+def test_the_submit_button_is_clicked_by_its_own_name(monkeypatch):
+    install(monkeypatch)
+    found = labels(monkeypatch, present=["Submit application"])
+    assert newui.advance(None, None, "Submit application") is True
+    assert found.asked == ["Submit application"]

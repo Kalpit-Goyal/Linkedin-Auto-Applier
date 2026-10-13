@@ -205,7 +205,8 @@ SCHEMA = [
             # --- advanced search options ---
             _f("Search", "search", "switch_number", "Applications before switching term", "number",
                "How many applications to submit for one search term before moving on to the next. A number greater than 0.", advanced=True),
-            _f("Search", "search", "randomize_search_order", "Randomize search order", "bool",
+            _f("Search", "search", "manual_search_mode", "Apply to my current search (manual mode)", "bool", "ON: user sets search in browser; OFF: bot builds search."),
+        _f("Search", "search", "randomize_search_order", "Randomize search order", "bool",
                "Shuffle the order your search terms are used.", advanced=True),
             _f("Search", "search", "sort_by", "Sort results by", "select",
                "How LinkedIn should sort results. Leave blank to not change it.",

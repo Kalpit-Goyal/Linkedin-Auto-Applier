@@ -111,9 +111,13 @@ def validate_search() -> None | ValueError | TypeError:
     global __validation_file_path
     __validation_file_path = "config/search.py"
 
-    check_list(search_terms, "search_terms", min_length=1)
+    if manual_search_mode:
+        check_list(search_terms, "search_terms")          # still must be a list of strings
+    else:
+        check_list(search_terms, "search_terms", min_length=1)
     check_string(search_location, "search_location")
     check_int(switch_number, "switch_number", 1)
+    check_boolean(manual_search_mode, "manual_search_mode")
     check_boolean(randomize_search_order, "randomize_search_order")
 
     check_string(sort_by, "sort_by", ["", "Most recent", "Most relevant"])

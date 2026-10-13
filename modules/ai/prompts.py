@@ -32,19 +32,42 @@ JOB DESCRIPTION:
 ##> Answer a form question
 # Used with `ai_answer_prompt.format(user_information, question)`.
 ai_answer_prompt = """
-You are helping a job seeker fill in a job-application form. Answer the single question below the way the applicant would, in the first person, using the applicant's information whenever it is relevant.
+You are helping a job seeker fill in a job-application form. Answer the single question below using ONLY the applicant's information provided. If the information needed is not in the applicant's information, respond with exactly "UNKNOWN".
 
-Formatting rules:
-- If the question asks for a number, a count, or years/months of experience, reply with just the number (for example: 3).
+Formatting rules (STRICT):
+- If the question asks for a number, a count, or years/months of experience, reply with ONLY the digits (for example: "3").
 - If it is a yes/no question, reply with exactly "Yes" or "No".
 - If it asks for a short answer, reply in a single sentence.
 - If it asks for a longer or free-text answer, reply with a natural, well-structured response of at most 350 characters.
-- Never repeat the question, never add labels, never add commentary. Return only the answer itself.
+- If options are provided, you MUST return EXACTLY ONE of the listed options, character-for-character.
+- Never repeat the question, never add labels, never add commentary, never add explanations. Return ONLY the answer itself.
+- If you cannot determine the answer from the applicant's information, return exactly "UNKNOWN".
 
 Applicant information:
 {}
 
 Question:
+{}
+"""
+#<
+
+##> Answer a form question with options
+# Used when the question has predefined choices (select/radio).
+ai_answer_prompt_with_options = """
+You are helping a job seeker fill in a job-application form. Answer the single question below using ONLY the applicant's information provided. If the information needed is not in the applicant's information, respond with exactly "UNKNOWN".
+
+Formatting rules (STRICT):
+- You MUST return EXACTLY ONE of the listed options below, character-for-character.
+- Do not add any text before, after, or around the option.
+- If you cannot determine the answer from the applicant's information, return exactly "UNKNOWN".
+
+Applicant information:
+{}
+
+Question:
+{}
+
+Options (choose exactly one):
 {}
 """
 #<

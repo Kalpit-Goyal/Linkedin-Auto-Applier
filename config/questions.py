@@ -115,6 +115,28 @@ recent_employer = "Not Applicable" # "", "Lala Company", "Google", "Snowflake", 
 
 # Example question: "On a scale of 1-10 how much experience do you have building web or mobile applications? 1 being very little or only in school, 10 being that you have built and launched applications to real users"
 confidence_level = "8"             # Any number between "1" to "10" including 1 and 10, put it in quotes ""
+
+# Per-skill experience map for "experience with/in" questions.
+# The skill after "experience with/in" is looked up here.
+# Example: "How many years of experience do you have with Python?" -> 4
+experience_map = {
+    "python": 4,
+    "java": 2,
+    "javascript": 3,
+    "typescript": 3,
+    "react": 3,
+    "node": 3,
+    "aws": 3,
+    "docker": 2,
+    "kubernetes": 2,
+    "sql": 4,
+    "default": 1,
+}
+
+# If True, skip the job application when a question cannot be answered.
+# If False, pause for manual intervention (respects pause_at_failed_question).
+skip_job_if_unanswered = True
+
 ##
 
 

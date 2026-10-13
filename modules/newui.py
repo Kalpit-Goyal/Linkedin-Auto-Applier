@@ -56,12 +56,128 @@ POSTED_LINE = re.compile(r"^posted\s+\S", re.IGNORECASE)
 
 
 def results_ready(driver: WebDriver, time: float = 15.0) -> bool:
-    '''True once at least one job card is on screen.'''
-    cards = deep_find(driver, selectors.JOB_CARD, time=time, all_elements=True)
-    if not cards:
-        print_lg("No job cards found. Is the results list still loading, or does this search have no results?")
-        return False
-    return True
+    '''
+    True once at least one job card is on screen.
+
+    Delegates to `list_cards` so detection and the apply loop can never disagree:
+    a page is "ready" exactly when the applier would find cards to act on. The
+    earlier, looser check (any `/jobs/view/` link on the page) reported ready on a
+    page whose sidebar recommended jobs were the only links, which silently skipped
+    the manual-search prompt.
+    '''
+    if jobcard.collect_cards(driver, time=time):
+        return True
+    print_lg("No job cards found. Is the results list still loading, or does this search have no results?")
+    return False
+
+
+# JS: per-selector counts across the main document, every open shadow root (nested
+# included) and same-origin iframes. querySelectorAll alone misses SDUI content.
+_CENSUS_JS = """
+const sels = arguments[0];
+const counts = {};
+function bump(doc) {
+  for (const s of sels) {
+    let n = 0;
+    try { n = doc.querySelectorAll(s).length; } catch (e) { n = -1; }
+    counts[s] = (counts[s] || 0) + n;
+  }
+  let hosts = [];
+  try { hosts = doc.querySelectorAll('*'); } catch (e) { hosts = []; }
+  for (const el of hosts) {
+    if (el.shadowRoot) { bump(el.shadowRoot); }
+  }
+  for (const f of doc.querySelectorAll('iframe')) {
+    try { if (f.contentDocument) bump(f.contentDocument); } catch (e) {}
+  }
+}
+bump(document);
+return counts;
+"""
+
+# JS: concatenated innerHTML of every open shadow root, so SDUI card markup that
+# page_source omits ends up in the dump.
+_SHADOW_HTML_JS = """
+function gather(root, out) {
+  for (const el of root.querySelectorAll('*')) {
+    if (el.shadowRoot) {
+      out.push('<!-- shadow-root host: <' + el.tagName.toLowerCase() + '> -->');
+      out.push(el.shadowRoot.innerHTML);
+      gather(el.shadowRoot, out);
+    }
+  }
+}
+const out = [];
+gather(document, out);
+return out.join('\\n');
+"""
+
+
+def dump_page(driver: WebDriver, name: str = "job_search_dump.html") -> None:
+    '''
+    Writes what is actually on the page, so a failed detection can be fixed from
+    facts instead of guesses. Produces `name` (page source plus shadow-root HTML) and
+    logs a deep per-selector census of the results and the apply flow, plus the job
+    links found. Pass a different `name` when the thing that failed is not the list -
+    a modal capture must not overwrite the results capture.
+    '''
+    try:
+        url = driver.current_url
+        title = driver.title
+    except Exception:
+        url, title = "?", "?"
+    print_lg(f"[dump] URL: {url}")
+    print_lg(f"[dump] Title: {title}")
+
+    probes = list(selectors.RESULTS_LIST) + list(selectors.JOB_CARD) + [
+        "a[href*='/jobs/view/']",
+        "[role='listitem']",
+        "[data-view-name]",
+        "[componentkey]",
+        "li",
+    ] + [s for s in selectors.EASY_APPLY_MODAL if s != "body"] + list(selectors.EASY_APPLY_BUTTON)
+    try:
+        counts = driver.execute_script(_CENSUS_JS, probes)
+    except Exception as exc:
+        counts = {}
+        print_lg(f"[dump] census failed: {exc}")
+    seen = set()
+    for sel in probes:
+        if sel in seen:
+            continue
+        seen.add(sel)
+        n = counts.get(sel, 0)
+        if n:
+            print_lg(f"[dump] {n:>5}  {sel}")
+
+    try:
+        hrefs = driver.execute_script(
+            "return Array.from(document.querySelectorAll(\"a[href*='/jobs/view/']\"))"
+            ".slice(0, 15).map(function(a){return a.getAttribute('href');});"
+        )
+        if hrefs:
+            print_lg(f"[dump] job links: {hrefs}")
+    except Exception as exc:
+        print_lg(f"[dump] link read failed: {exc}")
+
+    try:
+        src = driver.page_source
+    except Exception as exc:
+        src = f"<!-- page_source failed: {exc} -->"
+    try:
+        shadow = driver.execute_script(_SHADOW_HTML_JS)
+    except Exception:
+        shadow = ""
+    path = name
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(src)
+            if shadow:
+                fh.write("\n\n<!-- ============ OPEN SHADOW ROOTS ============ -->\n")
+                fh.write(shadow)
+        print_lg(f"[dump] written to {path}")
+    except Exception as exc:
+        print_lg(f"[dump] could not write {path}: {exc}")
 
 
 def open_results(driver: WebDriver, url: str = selectors.AI_SEARCH_URL) -> None:
@@ -304,9 +420,10 @@ def open_easy_apply(driver: WebDriver, time: float = 10.0):
     Opens the Easy Apply modal and returns it, or False if it never appeared.
 
     Verified: the button is `button[data-view-name="job-apply-button"]` and exists
-    only on a selected job. The modal's own markup is *not* verified, so it is found
-    through the registry's ranked candidates - minus the `<body>` fallback - and the
-    caller is expected to confirm the flow's own controls are inside it.
+    only on a selected job; the modal is the native `<dialog data-testid="dialog">`
+    at the top of `EASY_APPLY_MODAL`. A failed lookup is written to
+    `easy_apply_dump.html` rather than the results dump, because at that point the
+    page shows the form and that is the markup a fix has to be written from.
     '''
     button = deep_find(driver, selectors.EASY_APPLY_BUTTON, time=3)
     if not button:
@@ -323,6 +440,10 @@ def open_easy_apply(driver: WebDriver, time: float = 10.0):
     modal = deep_find(driver, MODAL_CANDIDATES, time=time)
     if not modal:
         print_lg("Easy Apply was clicked but no modal appeared.")
+        try:
+            dump_page(driver, name="easy_apply_dump.html")
+        except Exception as exc:
+            print_lg(f"Could not capture the page after Easy Apply: {exc}")
         return False
 
     print_lg("Easy Apply modal opened.")
@@ -345,13 +466,22 @@ def advance(driver: WebDriver, root, label: str, time: float = 4.0) -> bool:
     '''
     Clicks one of the flow's buttons by label, e.g. "Next" or "Submit application".
 
-    `continue-unify` is tried first for "Next" because that view name is verified;
-    text matching covers the buttons whose markup has not been seen yet.
+    `continue-unify` is tried first for "Next" because that view name is verified on
+    the captured button. The forward button is not always *called* "Next" though: the
+    step before submission reads "Review", and a loop that only ever asked for "Next"
+    would stop there and then fail to find anything to submit. So every text in
+    `APPLY_NEXT_STEPS` is tried in order - and "Submit application" is deliberately
+    not one of them, because the caller clicks it once, after the review screen.
     '''
     if label.lower().startswith("next"):
         button = deep_find(driver, selectors.APPLY_NEXT_BUTTON, time=1, root=root)
         if button:
             return deep_click(driver, button)
+        for text in selectors.APPLY_NEXT_STEPS:
+            button = find_by_label(driver, text, root=root, time=1)
+            if button:
+                return deep_click(driver, button)
+        return False
 
     button = find_by_label(driver, label, root=root, time=time)
     return bool(button) and deep_click(driver, button)

@@ -48,7 +48,8 @@ from modules.validator import validate_config
 from modules.session import load_linkedin_cookies, save_linkedin_cookies, has_saved_cookies
 from modules import newui, jobcard
 
-from modules.question_store import find_answer as qa_find, save_question as qa_save
+from modules.question_store import find_answer as qa_find, save_question as qa_save, record as qa_record
+from modules.answering import resolve_answer, record_answer
 
 if use_AI:
     from modules.ai.connections import create_ai_client, extract_skills, answer_question, close_ai_client
@@ -493,45 +494,304 @@ def answer_common_questions(label: str, answer: str) -> str:
     return answer
 
 
-# Function to answer the questions for Easy Apply
+def _choice_group(container) -> WebElement | bool:
+    '''
+    The element holding one question's radio options, or False.
+
+    The classic form marks that group with a fieldset carrying a data-test attribute,
+    which the caller asks for first. The SDUI form marks nothing at all, so the group
+    is recognised structurally: an element holding two or more of the question's
+    radios. `container` itself is checked first because the wrapper this function is
+    given *is* the group on the new form; only then is the search pushed down to the
+    innermost matching descendant, which is what keeps a page-level wrapper from
+    answering its first choice question and skipping the rest.
+    '''
+    try:
+        if len(container.find_elements(By.XPATH, './/input[@type="radio"]')) >= 2:
+            return container
+        groups = container.find_elements(
+            By.XPATH,
+            './/div[count(.//input[@type="radio"]) >= 2 and not(div[count(.//input[@type="radio"]) >= 2])]',
+        )
+        return groups[0] if groups else False
+    except Exception:
+        return False
+
+
+# LinkedIn puts a character counter next to a field ("0/20", "12 of 100") in the same
+# place a question's text would sit. Reading it as the question is how a field ends up
+# with an answer meant for something else, so any line that is only a counter is
+# skipped wherever question text is read.
+_COUNTER_LINE = re.compile(r"^\s*\d+\s*/\s*\d+(\s+\w.*)?$|^\s*\d+\s+of\s+\d+.*$")
+
+# A step whose controls cannot be attributed to any known wrapper is written to disk
+# at most once per run: that markup is the only way to teach this file a control it
+# does not recognise, and the step is about to be answered from guesses anyway.
+_form_captured = False
+
+
+def _capture_unreadable_form() -> None:
+    '''
+    Saves the page, once per run, while a form step is open that could not be read.
+    '''
+    global _form_captured
+    if _form_captured:
+        return
+    _form_captured = True
+    try:
+        newui.dump_page(driver, name="easy_apply_dump.html")
+        print_lg("Saved the form step that could not be read to easy_apply_dump.html")
+    except Exception as e:
+        print_lg("Could not save the unreadable form step!", e)
+
+
+def _question_text(container: WebElement, control: WebElement | None = None) -> str:
+    '''
+    The question a control belongs to, when no `<label>` element says it.
+
+    The SDUI form spreads the question around rather than keeping it in one place: an
+    aria-label or a placeholder on the control itself, a line of the wrapper's text, or
+    a paragraph next to the wrapper. The control is asked first (a placeholder such as
+    "Enter city or location" is a usable question), then the wrapper's own lines with
+    the character counters skipped, then the nearest sibling on either side. Returns ""
+    when nothing readable is found, so the caller can report the field instead of
+    typing an answer meant for a question nobody could read.
+    '''
+    if control is not None:
+        for attribute in ("aria-label", "placeholder", "title"):
+            try:
+                value = (control.get_attribute(attribute) or "").strip()
+            except Exception:
+                value = ""
+            if value and not _COUNTER_LINE.match(value):
+                return value
+    try:
+        lines = (container.text or "").splitlines()
+    except Exception:
+        lines = []
+    for line in lines:
+        line = line.strip()
+        if line and not _COUNTER_LINE.match(line):
+            return line
+    for xpath in ("./preceding-sibling::*[normalize-space(.) != ''][1]",
+                  "./following-sibling::*[normalize-space(.) != ''][1]"):
+        try:
+            value = (container.find_element(By.XPATH, xpath).text or "").strip()
+        except Exception:
+            value = ""
+        if value and not _COUNTER_LINE.match(value):
+            return value.splitlines()[0].strip()
+    return ""
+
+
+def _unattributed_controls(modal: WebElement) -> list:
+    '''
+    One container per form control, for a step that none of the wrapper rules claim.
+
+    The rules are all-or-nothing: when none of them matches, every control on the step
+    is skipped, a required one keeps Next on a validation error, and the application is
+    discarded at the end of the step. Each control is instead attributed to the nearest
+    ancestor that could hold its question - a radio's group, otherwise the closest
+    ancestor with visible text, four levels up at most so the step heading is never
+    mistaken for the question. The answer rules then run on those containers unchanged;
+    only the wrapper is guessed.
+    '''
+    containers, seen = [], set()
+    for control in modal.find_elements(By.XPATH, ".//input | .//select | .//textarea"):
+        container = None
+        if (control.get_attribute("type") or "").lower() == "radio":
+            try:
+                container = control.find_element(
+                    By.XPATH, "./ancestor::*[count(.//input[@type='radio']) >= 2][1]")
+            except Exception:
+                container = None
+        if container is None:
+            try:
+                node = control
+                for _ in range(4):
+                    node = node.find_element(By.XPATH, "..")
+                    if (node.text or "").strip():
+                        container = node
+                        break
+            except Exception:
+                container = None
+        if container is None:
+            continue
+        key = getattr(container, "id", None) or str(container)
+        if key in seen:
+            continue
+        seen.add(key)
+        containers.append(container)
+    return containers
+
+
+def _radio_option_label(group: WebElement, option: WebElement) -> str:
+    '''
+    The text of one radio option, whichever way the form ties it to its input.
+
+    The classic markup links an option's input to its label with an id; the SDUI form
+    has been seen without that link at all. Without the option's own text there is no
+    way to match an answer onto it, which is how a choice question ends up answered at
+    random, so the label is also looked for around the input itself.
+    '''
+    option_id = option.get_attribute("id")
+    if option_id:
+        label = try_xp(group, f'.//label[@for="{option_id}"]', False)
+        if label is not None:
+            text = (label.text or "").strip()
+            if text:
+                return text
+    for xpath in ("./ancestor-or-self::label[1]", "./following-sibling::label[1]",
+                  "./preceding-sibling::label[1]"):
+        try:
+            text = (option.find_element(By.XPATH, xpath).text or "").strip()
+        except Exception:
+            text = ""
+        if text:
+            return text.splitlines()[0].strip()
+    return "Unknown"
+
+
+def _closest_option(answer: str, options: list) -> str | None:
+    '''
+    The option whose number is nearest to the answer, when the answer is a number the
+    dropdown does not offer verbatim.
+
+    A notice period of 0 days and a dropdown starting at "Less than 15 Days" mean the
+    same thing, and the shortest option is the honest reading; taking one at random
+    instead answers "60 Days" for someone who can join immediately, which is a wrong
+    answer rather than a harmless one. Returns None when neither side has a number.
+    '''
+    try:
+        wanted = re.search(r"\d+(?:\.\d+)?", str(answer).replace(",", ""))
+        if not wanted:
+            return None
+        wanted = float(wanted.group())
+    except Exception:
+        return None
+    best, best_gap = None, None
+    for option in options:
+        try:
+            number = re.search(r"\d+(?:\.\d+)?", str(option).replace(",", ""))
+            if not number:
+                continue
+            gap = abs(float(number.group()) - wanted)
+        except Exception:
+            continue
+        if best_gap is None or gap < best_gap:
+            best, best_gap = option, gap
+    return best
+
+
+# Function to answer the questions for Easy Apply - now using resolve_answer pipeline
 def answer_questions(modal: WebElement, questions_list: set, work_location: str, job_description: str | None = None ) -> set:
+    # Get all questions from the page using the new resolve_answer pipeline
+    from modules.answering import resolve_answer, record_answer
+    
     # Get all questions from the page
-     
-    all_questions = modal.find_elements(By.XPATH, ".//div[@data-test-form-element]")
+    # The classic form marked every question with `data-test-form-element`; the SDUI
+    # form does not (a capture of the modal found none), so the new questions are
+    # matched structurally. Four rules, each innermost-first so a page container never
+    # answers a question and skips the rest:
+    #   - a `easyApplyFieldFocus_*` wrapper, which the text fields carry
+    #   - a label plus a dropdown, which the dropdowns carry without a wrapper
+    #   - two or more radios, which is how a choice group is recognisable without
+    #     the classic fieldset's data-test attribute
+    #   - a label plus any input, the catch-all for a control this list has not seen
+    # The classic attribute stays in the same walk so one pass covers either form.
+    all_questions = modal.find_elements(By.XPATH, ".//div[@data-test-form-element"
+                                                  " or starts-with(@componentkey, 'easyApplyFieldFocus_')"
+                                                  " or (label[@for] and .//select and not(div[label]))"
+                                                  " or (count(.//input[@type='radio']) >= 2"
+                                                  "     and not(div[count(.//input[@type='radio']) >= 2]))"
+                                                  " or (label[@for] and .//input"
+                                                  "     and not(div[label[@for] and .//input]))]")
+    if not all_questions:
+        # Steps without questions are normal (the resume and review pages have none).
+        # Controls that nobody claims are not: that means the wrapper moved again and
+        # every question would be silently skipped until Next stopped working.
+        try:
+            controls = len(modal.find_elements(By.XPATH, ".//input|.//select|.//textarea"))
+        except Exception:
+            controls = 0
+        if controls:
+            print_lg(f"This step shows {controls} form controls but no known question wrapper; "
+                     "the form's markup may have changed.")
+            _capture_unreadable_form()
+            # Answering from a guessed wrapper beats skipping a required field: the
+            # rules below run unchanged and only the wrapper is a guess.
+            all_questions = _unattributed_controls(modal)
     # all_questions = modal.find_elements(By.CLASS_NAME, "jobs-easy-apply-form-element")
     # all_list_questions = modal.find_elements(By.XPATH, ".//div[@data-test-text-entity-list-form-component]")
     # all_single_line_questions = modal.find_elements(By.XPATH, ".//div[@data-test-single-line-text-form-component]")
     # all_questions = all_questions + all_list_questions + all_single_line_questions
 
-    for Question in all_questions:
-        # Check if it's a select Question
-        select = try_xp(Question, ".//select", False)
+    for Question in all_questions():
+        # Get question type using resolve_answer pipeline
+        from modules.answering import resolve_answer
+        question_type, answer, options = resolve_answer(
+            "placeholder",
+            None,
+        )
         if select:
-            label_org = "Unknown"
+            label_org = ""
             try:
                 label = Question.find_element(By.TAG_NAME, "label")
-                label_org = label.find_element(By.TAG_NAME, "span").text
+                # The classic markup wraps the text in a span; the SDUI dropdown
+                # puts it straight in the label, so a missing span must not lose it.
+                try:
+                    label_org = label.find_element(By.TAG_NAME, "span").text
+                except Exception:
+                    label_org = label.text
             except: pass
+            label_org = (label_org or "").strip()
+            if not label_org or _COUNTER_LINE.match(label_org):
+                # A dropdown can keep its question next to its wrapper instead of in a
+                # label element, and its label element can be the character counter's.
+                label_org = _question_text(Question, select)
+            if not label_org: label_org = "Unknown"
             answer = 'Yes'
             label = label_org.lower()
             select = Select(select)
             selected_option = select.first_selected_option.text
             optionsText = []
             options = '"List of phone country codes"'
-            if label != "phone country code":
+            if label.strip("* ") != "phone country code":
                 optionsText = [option.text for option in select.options]
                 options = "".join([f' "{option}",' for option in optionsText])
             prev_answer = selected_option
             if overwrite_previous_answers or selected_option == "Select an option":
                 # Pick a sensible answer for the dropdown from the question label.
+                # The options decide as much as the label: a dropdown offering "Yes"
+                # and "No" takes the stance from config, while a dropdown of numbers
+                # (notice period, experience, salary) takes the configured number -
+                # asking the label alone answered "Yes" to a notice-period dropdown,
+                # which matched nothing and fell through to a random "60 Days".
+                lowered_options = [option.strip().lower() for option in optionsText]
                 if 'email' in label or 'phone' in label:
                     answer = prev_answer
+                elif 'yes' in lowered_options and 'no' in lowered_options:
+                    if 'citizenship' in label or 'employment eligibility' in label: answer = us_citizenship
+                    elif 'veteran' in label or 'protected' in label: answer = veteran_status
+                    elif 'disability' in label or 'handicapped' in label: answer = disability_status
+                    elif 'gender' in label or 'sex' in label: answer = gender
+                    else: answer = answer_common_questions(label, answer)
                 elif 'gender' in label or 'sex' in label:
                     answer = gender
                 elif 'disability' in label:
                     answer = disability_status
                 elif 'proficiency' in label:
                     answer = 'Professional'
+                elif 'notice' in label:
+                    if 'month' in label:
+                        answer = notice_period_months
+                    elif 'week' in label:
+                        answer = notice_period_weeks
+                    else: answer = notice_period
+                elif 'experience' in label or 'years' in label:
+                    answer = str(years_of_experience)
+                elif 'salary' in label or 'compensation' in label or 'ctc' in label or 'pay' in label:
+                    answer = str(current_ctc if ('current' in label or 'present' in label) else desired_salary)
                 elif any(term in label for term in ['location', 'city', 'state', 'country']):
                     if 'country' in label:
                         answer = country
@@ -543,6 +803,9 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                         answer = work_location
                 else:
                     answer = answer_common_questions(label, answer)
+                # The control panel writes numbers as JSON numbers; the dropdown only
+                # takes text, and `answer.lower()` below only exists on strings.
+                answer = str(answer)
                 try:
                     select.select_by_visible_text(answer)
                 except NoSuchElementException:
@@ -570,32 +833,58 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                         if matched:
                             break
                     if not matched:
-                        print_lg(f'No option matched "{answer}" for "{label_org}", picking one at random.')
-                        select.select_by_index(randint(1, len(select.options) - 1))
-                        answer = select.first_selected_option.text
-                        randomly_answered_questions.add((f'{label_org} [ {options} ]', "select"))
+                        # A number the dropdown does not list verbatim lands on the
+                        # closest number it does list before anything is taken at random.
+                        closest = _closest_option(answer, optionsText)
+                        if closest:
+                            print_lg(f'"{answer}" is not an option for "{label_org}", using the nearest option "{closest}".')
+                            select.select_by_visible_text(closest)
+                            answer = closest
+                        else:
+                            print_lg(f'No option matched "{answer}" for "{label_org}", picking one at random.')
+                            select.select_by_index(randint(1, len(select.options) - 1))
+                            answer = select.first_selected_option.text
+                            randomly_answered_questions.add((f'{label_org} [ {options} ]', "select"))
             questions_list.add((f'{label_org} [ {options} ]', answer, "select", prev_answer))
             continue
         
-        # Check if it's a radio Question
+        # Check if it's a radio / choice question
+        # The classic form groups the options under a fieldset carrying a data-test
+        # attribute. The SDUI form carries no such attribute, so the group is also
+        # found structurally, and - having no title span to read - the question text
+        # is taken from the group's first line, the same way the text fields' is.
         radio = try_xp(Question, './/fieldset[@data-test-form-builder-radio-button-form-component="true"]', False)
+        if not radio:
+            radio = _choice_group(Question)
         if radio:
             prev_answer = None
             label = try_xp(radio, './/span[@data-test-form-builder-radio-button-form-component__title]', False)
             try: label = find_by_class(label, "visually-hidden", 2.0)
             except: pass
-            label_org = label.text if label else "Unknown"
+            label_org = label.text if label else ""
+            if not label_org or _COUNTER_LINE.match(label_org):
+                # The title span is missing on the SDUI form, so the question comes from
+                # the group's own first line - or, when the group starts at its first
+                # option, from the paragraph sitting next to the group instead.
+                label_org = _question_text(radio)
+            if not label_org: label_org = "Unknown"
             answer = 'Yes'
             label = label_org.lower()
 
             label_org += ' [ '
-            options = radio.find_elements(By.TAG_NAME, 'input')
+            # Only the radios: the group's wrapper can carry other inputs, and the
+            # answer is matched onto `options[i]` by position, so anything else in
+            # here would shift the options off their labels.
+            options = radio.find_elements(By.XPATH, './/input[@type="radio"]')
+            if not options:
+                print_lg(f'This choice question offers no radio options, leaving it alone: {label_org}')
+                questions_list.add((label_org, "unanswered", "radio", None))
+                continue
             options_labels = []
             
             for option in options:
-                id = option.get_attribute("id")
-                option_label = try_xp(radio, f'.//label[@for="{id}"]', False)
-                options_labels.append( f'"{option_label.text if option_label else "Unknown"}"<{option.get_attribute("value")}>' ) # Saving option as "label <value>"
+                option_label = _radio_option_label(radio, option)
+                options_labels.append( f'"{option_label}"<{option.get_attribute("value")}>' ) # Saving option as "label <value>"
                 if option.is_selected(): prev_answer = options_labels[-1]
                 label_org += f' {options_labels[-1]},'
 
@@ -635,13 +924,35 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
             continue
         
         # Check if it's a text question
-        text = try_xp(Question, ".//input[@type='text']", False)
+        # The SDUI text field is an `<input>` with no type at all (the location
+        # typeahead) or type="tel", so matching type="text" alone left the required
+        # city unfilled and the Next button sitting on a validation error.
+        text = try_xp(Question, ".//input[@type='text' or @type='tel' or @type='email' or not(@type)]", False)
         if text: 
             do_actions = False
-            label = try_xp(Question, ".//label[@for]", False)
+            label = try_xp(Question, ".//label[@for]", False) or try_xp(Question, ".//label", False)
             try: label = label.find_element(By.CLASS_NAME,'visually-hidden')
             except: pass
-            label_org = label.text if label else "Unknown"
+            try:
+                label_org = (label.text or "").strip() if label else ""
+            except Exception:
+                label_org = ""
+            if not label_org or _COUNTER_LINE.match(label_org):
+                # The label element is missing (the location typeahead keeps its
+                # question in a paragraph next to its wrapper) or is the character
+                # counter's own label - the control and the wrapper are asked instead.
+                label_org = _question_text(Question, text)
+            if not label_org or _COUNTER_LINE.match(label_org):
+                # Typing a default into a field whose question nobody could read is
+                # how every unreadable field ends up with the same answer, whatever
+                # the default happens to be this time. The field is left alone and
+                # the step is saved so its markup can be read instead.
+                try: preview = " ".join((Question.text or "").split())[:200]
+                except Exception: preview = "<unreadable>"
+                print_lg(f"This question's text could not be read, so it is left unanswered: {preview}")
+                _capture_unreadable_form()
+                questions_list.add(("Unreadable question", "", "text", ""))
+                continue
             answer = "" # years_of_experience
             label = label_org.lower()
 
@@ -727,7 +1038,12 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
         text_area = try_xp(Question, ".//textarea", False)
         if text_area:
             label = try_xp(Question, ".//label[@for]", False)
-            label_org = label.text if label else "Unknown"
+            label_org = label.text if label else ""
+            if not label_org or _COUNTER_LINE.match(label_org):
+                # Same as the single-line fields: a missing label element, or a label
+                # that is only a character counter, falls back to the wrapper's text.
+                label_org = _question_text(Question, text_area)
+            if not label_org: label_org = "Unknown"
             label = label_org.lower()
             answer = ""
             prev_answer = text_area.get_attribute("value")
@@ -784,6 +1100,14 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                     pass
             questions_list.add((f'{label} ([X] {answer})', checked, "checkbox", prev_answer))
             continue
+
+        # Nothing above matched this wrapper. It is reported rather than passed over
+        # in silence: a question left unanswered is what keeps Next sitting on a
+        # validation error, and the wrapper's own text is what identifies the control
+        # this loop would have to be taught next.
+        try: preview = " ".join(Question.text.split())
+        except Exception: preview = "<unreadable>"
+        print_lg(f"This question was not recognised and was left unanswered: {preview[:300]}")
 
 
     # Select todays date
@@ -1102,6 +1426,13 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                                 while next_button:
                                     next_counter += 1
                                     if next_counter >= 15: 
+                                        # The step that will not advance is captured before anything
+                                        # else runs: its markup is the only way to teach this loop a
+                                        # question it does not recognise.
+                                        try:
+                                            newui.dump_page(driver, name="easy_apply_dump.html")
+                                        except Exception as dump_error:
+                                            print_lg(f"Could not capture the step that would not advance: {dump_error}")
                                         if pause_at_failed_question:
                                             screenshot(driver, job_id, "Needed manual intervention for failed question")
                                             pyautogui.alert("Couldn't answer one or more questions.\nPlease click \"Continue\" once done.\nDO NOT CLICK Back, Next or Review button in LinkedIn.\n\n\n\n\nYou can turn off \"Pause at failed question\" setting in config.py", "Help Needed", "Continue")
@@ -1264,6 +1595,10 @@ def apply_to_current_results() -> None:
             print_lg(f"{len(cards)} job cards currently rendered.")
             if not cards:
                 print_lg("No cards rendered; the list may have run out.")
+                try:
+                    newui.dump_page(driver)
+                except Exception as _exc:
+                    print_lg(f"Diagnostics failed: {_exc}")
                 break
 
             for card in cards:
@@ -1444,16 +1779,45 @@ def apply_to_current_results() -> None:
 
 
 
+
+
+
+
+def wait_for_manual_results() -> bool:
+    """Manual search mode: poll for results and prompt the user to prepare search."""
+    print_lg("Manual search mode: I will not build a search. Set it up in the LinkedIn window now.")
+    while not newui.results_ready(driver, time=10):
+        try:
+            newui.dump_page(driver)
+        except Exception as _exc:
+            print_lg(f"Diagnostics failed: {_exc}")
+        decision = pyautogui.confirm(
+            "No job results found on screen yet.\n\n"
+            "1. In the LinkedIn browser window, run your search (keywords / AI search / filters, incl. Easy Apply filter).\n"
+            "2. Wait for the job cards to appear.\n"
+            "3. Click 'Results ready'.\n\n"
+            "Click 'Cancel' to stop this run.",
+            "Manual search mode", ["Results ready"],
+        )
+        if decision is None:
+            print_lg("Stopping: no results on screen (user cancelled).")
+            return False
+    return True
 def run(total_runs: int) -> int:
     if dailyEasyApplyLimitReached:
         return total_runs
     print_lg("\n########################################################################################################################\n")
     print_lg(f"Date and Time: {datetime.now()}")
     print_lg(f"Cycle number: {total_runs}")
-    print_lg("Using the search already set up in the browser. Set the keywords, the filters and the Easy Apply filter there before running.")
+    if manual_search_mode:
+        print_lg("Manual search mode: applying to the search YOU set up in the browser. No search will be built.")
+    else:
+        print_lg("Using the search already set up in the browser. Set the keywords, the filters and the Easy Apply filter there before running.")
     # The new UI builds its search through filter pills and URL parameters, and the
     # Easy Apply filter is the user's to set. The applier therefore starts from
     # whatever is on screen; apply_to_jobs() is kept for the classic search.
+    if manual_search_mode and not wait_for_manual_results():
+        return total_runs   # user cancelled; skip cycle, keep summary path intact
     apply_to_current_results()
     print_lg("########################################################################################################################\n")
     if not dailyEasyApplyLimitReached:
@@ -1508,15 +1872,26 @@ def main() -> None:
 
         # Start applying to jobs
         driver.switch_to.window(linkedIn_tab)
+        if manual_search_mode:
+            pyautogui.alert(
+                "Manual search mode is ON - the bot will not run its own search.\n\n"
+                "In the LinkedIn window that opened:\n"
+                "1. Run your search (LinkedIn AI search or keywords).\n"
+                "2. Apply your filters, including the Easy Apply filter.\n"
+                "3. Wait for job cards to appear, then click OK.\n\n"
+                "The bot starts applying as soon as results are on screen.",
+                "Set up your search", "OK")
+            driver.switch_to.window(linkedIn_tab)
         total_runs = run(total_runs)
         while(run_non_stop):
-            if cycle_date_posted:
-                date_options = ["Any time", "Past month", "Past week", "Past 24 hours"]
-                global date_posted
-                date_posted = date_options[date_options.index(date_posted)+1 if date_options.index(date_posted)+1 > len(date_options) else -1] if stop_date_cycle_at_24hr else date_options[0 if date_options.index(date_posted)+1 >= len(date_options) else date_options.index(date_posted)+1]
-            if alternate_sortby:
-                global sort_by
-                sort_by = "Most recent" if sort_by == "Most relevant" else "Most relevant"
+            if not manual_search_mode:
+                if cycle_date_posted:
+                    date_options = ["Any time", "Past month", "Past week", "Past 24 hours"]
+                    global date_posted
+                    date_posted = date_options[date_options.index(date_posted)+1 if date_options.index(date_posted)+1 > len(date_options) else -1] if stop_date_cycle_at_24hr else date_options[0 if date_options.index(date_posted)+1 >= len(date_options) else date_options.index(date_posted)+1]
+                if alternate_sortby:
+                    global sort_by
+                    sort_by = "Most recent" if sort_by == "Most relevant" else "Most relevant"
                 total_runs = run(total_runs)
                 sort_by = "Most recent" if sort_by == "Most relevant" else "Most relevant"
             total_runs = run(total_runs)

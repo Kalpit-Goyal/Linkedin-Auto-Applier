@@ -524,6 +524,118 @@ def api_update_question():
     return jsonify({"error": "Question not found"}), 404
 
 
+# ===========================================================================
+# AI API
+# ===========================================================================
+_ai_client = None
+_ai_sig = None
+_ai_lock = threading.Lock()
+
+
+def _ai_config_signature():
+    '''(use_AI, provider, model, key, url, temperature) from the user's config.'''
+    user = _overrides.load_user_config()
+    secrets = user.get("secrets", {})
+    return (
+        bool(secrets.get("use_AI", DEFAULTS["secrets"].get("use_AI"))),
+        str(secrets.get("ai_provider", DEFAULTS["secrets"].get("ai_provider"))),
+        str(secrets.get("llm_model", DEFAULTS["secrets"].get("llm_model"))),
+        str(secrets.get("llm_api_key", DEFAULTS["secrets"].get("llm_api_key"))),
+        str(secrets.get("llm_api_url", DEFAULTS["secrets"].get("llm_api_url"))),
+        secrets.get("llm_temperature", DEFAULTS["secrets"].get("llm_temperature")),
+    )
+
+
+def _get_ai_client():
+    '''
+    Lazily build (and cache) the AI client from the CURRENT saved config.
+    Returns None when AI is off or setup fails.
+    '''
+    global _ai_client, _ai_sig
+    with _ai_lock:
+        try:
+            import importlib
+            signature = _ai_config_signature()
+            if signature == _ai_sig and _ai_client is not None:
+                return _ai_client
+            _ai_sig = signature
+            _ai_client = None
+            if not signature[0]:  # use_AI is off
+                return None
+            # Config was saved through the panel, so re-read it before building.
+            import config.secrets as cfg
+            importlib.reload(cfg)
+            from modules.ai.connections import create_ai_client
+            _ai_client = create_ai_client()
+            return _ai_client
+        except Exception:
+            _ai_client = None
+            return None
+
+
+@app.route('/api/ai/answer', methods=['POST'])
+def api_ai_answer():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
+    question = (payload.get('question') or '').strip()
+    if not question:
+        return jsonify({'error': "'question' is required"}), 400
+    options = payload.get('options')
+    question_type = (payload.get('question_type') or 'text').strip()
+    job_description = payload.get('job_description')
+    about_company = payload.get('about_company')
+    user_information_all = payload.get('user_information_all')
+    stream = payload.get('stream', False)
+
+    client = _get_ai_client()
+    if not client:
+        return jsonify({'error': 'AI client unavailable - check config'}), 503
+
+    try:
+        from modules.ai.connections import answer_question
+        answer = answer_question(
+            client=client,
+            question=question,
+            options=options,
+            question_type=question_type,
+            job_description=job_description,
+            about_company=about_company,
+            user_information_all=user_information_all,
+            stream=stream,
+        )
+        if not answer:
+            # answer_question swallows provider errors and returns "" - surface them.
+            return jsonify({'answer': '', 'error': 'The model returned no answer. Check your API key, model name and URL.'}), 502
+        return jsonify({'answer': answer})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/extract-skills', methods=['POST'])
+def api_ai_extract_skills():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
+    job_description = (payload.get('job_description') or '').strip()
+    if not job_description:
+        return jsonify({'error': "'job_description' is required"}), 400
+    stream = payload.get('stream', False)
+
+    client = _get_ai_client()
+    if not client:
+        return jsonify({'error': 'AI client unavailable - check config'}), 503
+
+    try:
+        from modules.ai.connections import extract_skills
+        result = extract_skills(client=client, job_description=job_description, stream=stream)
+        if isinstance(result, dict) and result.get('error'):
+            return jsonify(result), 502
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 def _resolve_port(preferred: int = 5000) -> int:
     '''
     Pick a port to serve on. Honors the PORT environment variable (the launcher

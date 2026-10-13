@@ -38,7 +38,7 @@ from langgraph.graph import StateGraph, START, END
 import config.secrets as cfg
 from config.settings import showAiErrorAlerts
 from modules.helpers import print_lg, critical_error_log, convert_to_json
-from modules.ai.prompts import extract_skills_prompt, ai_answer_prompt
+from modules.ai.prompts import extract_skills_prompt, ai_answer_prompt, ai_answer_prompt_with_options
 
 try:
     from pyautogui import confirm
@@ -118,12 +118,10 @@ def create_ai_client() -> Optional[AIClient]:
         provider = _resolve_provider(cfg.ai_provider)
         model_name = cfg.llm_model
         api_key = (getattr(cfg, "llm_api_key", "") or "").strip()
-        temperature = getattr(cfg, "llm_temperature", None)
+        # Use low temperature for deterministic answers
+        temperature = 0.1
 
-        kwargs = {}
-        # Some newer models only accept their default temperature; leave it unset unless the user opts in.
-        if temperature is not None:
-            kwargs["temperature"] = temperature
+        kwargs = {"temperature": temperature}
 
         if provider == "google_genai":
             if api_key and api_key.lower() != "not-needed":
@@ -215,16 +213,23 @@ def _build_answer_graph(model):
     retries, resume/cover-letter nodes).
     '''
     def build_prompt(state: _AnswerState) -> dict:
-        prompt = ai_answer_prompt.format(state.get("user_information") or "N/A", state.get("question") or "")
+        user_info = state.get("user_information") or "N/A"
+        question = state.get("question") or ""
+        options = state.get("options")
+        
+        if options:
+            # Use the strict options prompt for select/radio questions
+            opts_text = "\n".join(f"- {o}" for o in options)
+            prompt = ai_answer_prompt_with_options.format(user_info, question, opts_text)
+        else:
+            prompt = ai_answer_prompt.format(user_info, question)
+        
         jd = state.get("job_description")
         if jd and jd != "Unknown":
             prompt += f"\n\nJob description:\n{jd}"
         about = state.get("about_company")
         if about and about != "Unknown":
             prompt += f"\n\nAbout the company:\n{about}"
-        options = state.get("options")
-        if options:
-            prompt += "\n\nAnswer with exactly one of these options:\n" + "\n".join(f"- {o}" for o in options)
         return {"prompt": prompt}
 
     def generate(state: _AnswerState) -> dict:

@@ -9,8 +9,11 @@ survive a rebuild, and the lists below are ordered by how much they can be trust
 
   1. **`data-view-name`** - LinkedIn's own instrumentation hook, and it still names
      things honestly. `job-search-job-card`, `job-apply-button`, `continue-unify`.
+     It is *not* on the results page any more: the latest capture has zero of them
+     in the document, so nothing that must work may lead with it.
   2. **`componentkey`** - names the component *and embeds the job id*:
      `job-card-component-ref-4473342199`, `JobDetails_AboutTheJob_4473342199`.
+     Since `data-view-name` left the card, this is what a job card is identified by.
   3. **ARIA roles and labels** - a button that calls itself "Easy Apply to this job"
      is a better handle than its class.
 
@@ -60,7 +63,12 @@ JOB_DETAILS_COMPONENTKEY = "[componentkey^='JobDetails_']"
 
 # Verified. `lazy-column` is the virtualised container the cards live in.
 JOB_CARD = [
-    "div[data-view-name='job-search-job-card']",   # verified, 25 on the captured page
+    # Verified, 25 on the captured page, and the only hook left on the card: the
+    # `data-view-name` that used to sit on the wrapper is gone from the current
+    # markup. The key is on the card twice - the `role="button"` div and the div
+    # inside it - so a card list is deduped by job id (see jobcard.py).
+    "div[componentkey^='job-card-component-ref-']",
+    "div[data-view-name='job-search-job-card']",   # verified on the earlier capture
     "li[data-entity-urn]",
     "li[data-occludable-job-id]",                 # classic
     "li[data-job-id]",
@@ -68,6 +76,39 @@ JOB_CARD = [
     "li.jobs-search-results__list-item",          # classic
     "div.job-card-container",                     # classic
     "div.scaffold-layout__list-item",             # classic
+    "div[data-test-id*='job-card']",
+    "div[data-job-title]",
+    "ul.jobs-search__results-list > li",
+    "ul.scaffold-layout__list-container > li",
+    ".jobs-search-results-list > li",
+    ".job-search-card",
+    "li.reusable-search__result-container",
+    "div.job-search-card",
+    "article.job-card",
+    "div.artdeco-list__item[data-occludable-job-id]",
+    "div.artdeco-card[data-job-id]",
+    "[data-testid='job-card']",
+    "[data-testid*='job-card']",
+    "[class*='job-card']",
+    "[class*='jobs-search-results'] li",
+    "li[data-test-id*='job-card']",
+    "div[data-view-name*='job-card']",
+    "[role='listitem']:has(a[href*='/jobs/view/'])",
+    "[role='listitem']",
+    # AI search / SDUI variants seen in the wild.
+    "div[data-testid='search-results__list-item']",
+    "li[data-testid='search-results__list-item']",
+    "div[data-testid='job-list-item']",
+    "li[data-testid='job-list-item']",
+    "[data-testid*='search-result']",
+    "div[class*='jobs-search-results-list__item']",
+    "li[class*='jobs-search-results-list__item']",
+    # NOT `div[data-sdui-screen*='job']`: that attribute is on the *screen*
+    # (`...jobs.SemanticJobDetails`) which wraps the whole page, so matching it
+    # hands the applier the entire results view as if it were a single card.
+    "[data-view-name*='job-search']",
+    "li:has(a[href*='/jobs/view/'])",
+    "article:has(a[href*='/jobs/view/'])",
 ]
 
 # The clickable region of a card. On the new UI this is a `role="button"` div rather
@@ -76,6 +117,9 @@ JOB_CARD_CLICKABLE = [
     "div[componentkey^='job-card-component-ref-']",   # verified
     "a[href*='/jobs/view/']",
     "a[data-tracking-control-name*='public_jobs_jserp-result']",  # classic
+    "[data-testid*='job-card'] [role='button']",
+    "[data-testid*='job-card'] button",
+    "div[role='button'][tabindex='0']",
 ]
 
 # Job ids come from here first. Verified values look like
@@ -90,6 +134,11 @@ JOB_ID_COMPONENTKEYS = [
 JOB_ID_ATTRIBUTES = ["data-job-id", "data-entity-urn", "data-occludable-job-id"]
 
 RESULTS_LIST = [
+    # Verified. Three `lazy-column`s are on the page (results, sidebar, details)
+    # and only the results one carries this key, so it is listed first: `deep_find`
+    # stops at the first selector that matches anywhere, and picking the wrong
+    # column would scope the card search to a list that has no cards in it.
+    "[data-testid='lazy-column'][componentkey='SearchResultsMainContent']",   # verified
     "[data-testid='lazy-column']",               # verified
     "[data-component-type='LazyColumn']",         # verified
     "div.jobs-search-results-list",               # classic
@@ -99,9 +148,13 @@ RESULTS_LIST = [
     "main",
 ]
 
-# Verified per-card text, in document order within a card: title, then company, then
-# location, then the "Posted N days ago" line. There is no data-test hook on any of
-# these, so they are reached positionally from the card and by text.
+# Per-card text. These are **classic-UI fallbacks only**. The captured new card has
+# no hook on any of its fields and puts them in `<p>` elements in a fixed order -
+# title, company, location, "Posted N days ago" - but every selector below returns
+# the *first* match, so on that card `div p` and `p` both hand back the title and
+# the company and the location read as the job's name. `jobcard.read_card()` reads
+# the paragraphs positionally for a new-UI card and only falls back to this list
+# when the card is not one.
 JOB_CARD_TITLE = [
     "p span",
     "h3.base-search-card__title",    # classic
@@ -247,14 +300,26 @@ APPLY_NEXT_BUTTON = [
     "button[data-view-name*='continue']",
 ]
 APPLY_NEXT = ["Next", "Continue", "Review", "Submit application"]
+# The same list without the submission: the forward button is not always called
+# "Next" - the step before submission is labelled "Review", which the classic loop
+# searched for by name - but "Submit application" is clicked exactly once, by the
+# caller, after the review screen, so it must never answer a request for "Next".
+APPLY_NEXT_STEPS = ["Next", "Continue", "Review"]
 APPLY_SUBMIT = ["Submit application", "Submit"]
 APPLY_DONE = ["Done"]
 APPLY_DISCARD = ["Discard application", "Discard", "Delete", "Cancel"]
 
-# The Easy Apply modal. NOT yet verified: at the time of the capture the modal was
-# not open, so none of these were confirmed. The capture has to be re-run with a
-# modal on screen before this list can be trusted.
+# The Easy Apply modal, verified against a capture taken with the form on screen: it
+# is a native `<dialog data-testid="dialog">` in the top document, holding the header,
+# the step's form and the flow's own buttons. A native dialog carries no `role`
+# attribute, so `[role='dialog']` - which used to sit at the top of this list - never
+# matched it, and the modal was reported as missing while it sat on screen. `body`
+# stays here for the capture tool, which must always have something to write; newui
+# drops it before searching because answering questions rooted at the page types into
+# whatever has focus.
 EASY_APPLY_MODAL = [
+    "dialog[data-testid='dialog']",           # verified
+    "dialog",                                 # verified: the tag alone is unique
     "div.jobs-easy-apply-modal",              # classic
     "[data-test='easy-apply-modal']",
     "[componentkey*='EasyApply']",
@@ -264,10 +329,13 @@ EASY_APPLY_MODAL = [
     "body",
 ]
 
-# The form controls. Also unverified for the same reason. `data-test-form-element`
-# is what `runAiBot.answer_questions()` matches on, so if the new form has dropped
-# it that function will need its field discovery rewritten.
+# The form controls. The classic form marked every question with
+# `data-test-form-element`; the SDUI form does not, so `runAiBot.answer_questions()`
+# builds its XPath from these: each question is wrapped in a `easyApplyFieldFocus_*`
+# key, except the two dropdowns (country code, email), which sit in a plain div
+# alongside their own `<label for>`.
 FORM_FIELD = [
+    "div[componentkey^='easyApplyFieldFocus_']",   # verified (SDUI question)
     "div[data-test-form-element]",
     "div[data-test-single-line-text-form-component]",
     "div[data-test-text-entity-list-form-component]",
